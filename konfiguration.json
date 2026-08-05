@@ -1,0 +1,37 @@
+{
+  "_hinweis": "Schlüssel mit führendem _ sind Kommentare und werden ignoriert.",
+
+  "_standard_sollstunden": "Sollstunden je Abwesenheitstag, wenn kein anderer Wert ermittelbar ist.",
+  "standard_sollstunden": 8.0,
+
+  "_durchschnitt_als_fallback": "true = fehlt unten ein Mitarbeiter, wird der Durchschnitt seiner in derselben KW gearbeiteten Tage verwendet; false = es gilt sofort standard_sollstunden.",
+  "durchschnitt_als_fallback": true,
+
+  "_sollstunden_je_mitarbeiter": "Individuelle Sollstunden je Tag. Schlüssel = P-Id aus Spalte C der AWL als Text. Die Beispielzeile _30000 ist ein Kommentar und wirkt nicht.",
+  "sollstunden_je_mitarbeiter": {
+    "_30000": 7.5
+  },
+
+  "_kategorien": "Zuordnung Anwesenheitscode (Spalte I der AWL) zur Auswertungskategorie. Codes, die hier fehlen, gelten nicht als Abwesenheit.",
+  "kategorien": {
+    "K2": "Krank",
+    "AK": "Krank",
+    "AKAS": "Krank",
+    "KA": "Arbeitsunfall",
+    "U2": "Urlaub",
+    "UU": "Urlaub unbezahlt",
+    "Ft": "Feiertag"
+  },
+
+  "_kategorie_reihenfolge": "Reihenfolge der Kategorien in den Übersichten.",
+  "kategorie_reihenfolge": [
+    "Krank",
+    "Urlaub",
+    "Feiertag",
+    "Arbeitsunfall",
+    "Urlaub unbezahlt"
+  ],
+
+  "_teiltag_codes": "Codes, bei denen der Mitarbeiter einen Teil des Tages gearbeitet hat: Abwesenheitsstunden = Sollstunden - Iststunden.",
+  "teiltag_codes": ["AK", "AKAS"]
+}
