@@ -5,6 +5,11 @@ aus und schreibt Kranken-, Urlaubs- und Feiertagsstunden als Excel-Bericht.
 
 Die Tagesdateien werden dabei **nur gelesen und nie verändert**.
 
+> **Zum ersten Einrichten und für den wöchentlichen Ablauf:
+> [ANLEITUNG.md](ANLEITUNG.md)** — Schritt für Schritt, von der
+> Python-Installation bis zum fertigen Bericht. Unter Windows genügt danach
+> ein Doppelklick auf `Auswertung_starten.bat`.
+
 ---
 
 ## Schnellstart
