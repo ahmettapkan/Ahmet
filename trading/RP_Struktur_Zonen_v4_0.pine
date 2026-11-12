@@ -1,12 +1,14 @@
 //@version=6
 // ============================================================================
-// RP Struktur & Zonen v4.0.1  –  Blueprint 701 als Setup-Lebenszyklus
+// RP Struktur & Zonen v4.0.2  –  Blueprint 701 als Setup-Lebenszyklus
 //
 // Phase 1 (Kern). Aufbau entlang der Pre-Trade-Checkliste des Blueprints:
 //   Schritt 1  Bias: Daily + 4H bestimmen die Richtung, 1H liefert Kontext und Suchzone.
 //              Eine laufende 1H-Wende blockiert nicht, nur eine bestätigte Gegenwende.
-//              v4.0.1: Eine laufende Wende (↓? / ↑?) im Daily zählt als Richtung, wenn der 4H
-//              sie bestätigt hat; im 4H entsprechend, wenn der 1H sie bestätigt hat.
+//              v4.0.1/2: Eine laufende Wende (↓? / ↑?) zählt als Richtung, wenn der nächsthöhere
+//              oder der nächsttiefere Zeitrahmen bestätigt in dieselbe Richtung zeigt.
+//   v4.0.2: Zonenkontakt wird je Richtung der 1H-Struktur gespeichert, unabhängig vom Bias.
+//           Erscheint der Bias erst nach dem CHoCH, zählt ein Bruch der letzten N Kerzen nach.
 //   Schritt 2  Struktur im Chart (BOS / CHoCH) mit derselben Funktion wie der Bias.
 //              Gegen den Trend zählt nur ein Schluss jenseits des Impulsursprungs (Fib 1).
 //   Schritt 3  Suchzone: Fib 0,5–1 des 1H-Impulses und/oder frische Demand/Supply (1H, 15M).
@@ -42,7 +44,7 @@ swLen4   = input.int(5, "Swing-Länge Richtung 2 (4H)", minval = 2, group = grp1
 swLenH   = input.int(5, "Swing-Länge Kontext (1H)", minval = 2, group = grp1)
 biasMode = input.string("Daily + 4H", "Bias gilt, wenn", options = ["Daily + 4H", "Daily + 4H + 1H", "Nur Daily"], group = grp1, tooltip = "Blueprint: Daily, 4H und 1H einheitlich. v4 nutzt den 1H als Kontext: eine laufende 1H-Wende (Rücksetzer) blockiert nicht, eine bestätigte 1H-Gegenwende schon (Schalter unten).")
 htfBlock = input.bool(true, "Bestätigte 1H-Gegenwende blockiert den Bias", group = grp1)
-pendOk   = input.bool(true, "Laufende Wende zählt, wenn der nächsttiefere Zeitrahmen sie bestätigt", group = grp1, tooltip = "Daily ↓? zählt als ↓, sobald der 4H bestätigt abwärts ist (4H ↓? entsprechend mit dem 1H). Ohne diese Regel blockiert eine Daily-Wende den Bias oft tagelang, bis das tiefere Hoch im Daily per Swing bestätigt ist. Aus = Verhalten v3.x.")
+pendOk   = input.bool(true, "Laufende Wende zählt, wenn ein Nachbar-Zeitrahmen sie bestätigt", group = grp1, tooltip = "4H ↓? zählt als ↓, wenn Daily oder 1H bestätigt abwärts sind. Daily ↓? zählt als ↓, wenn der 4H (bestätigt oder nach dieser Regel) abwärts ist. Ohne diese Regel blockiert eine laufende Wende den Bias oft stundenlang, bis das tiefere Hoch per Swing bestätigt ist. Aus = Verhalten v3.x.")
 protHtf  = input.bool(true, "Wende nur unter Fib 1 (geschütztes Tief/Hoch)", group = grp1, tooltip = "Gegen den Trend zählt nur ein Schluss jenseits des Impulsursprungs. Zwischentiefs im Rücksetzer kippen weder Bias noch Suchzone. Aus = Verhalten v3.8.")
 showFlip = input.bool(true, "Kipp-Level im Dashboard", group = grp1)
 
@@ -471,8 +473,8 @@ f_sdPrev(int len, float minI) =>
 [effH, trH, pendH, dirH, refH, fuH, fdH, hiH, loH] = request.security(syminfo.tickerid, tfH, f_structPrev(swLenH, protHtf), lookahead = barmerge.lookahead_on)
 adxH = request.security(syminfo.tickerid, tfH, f_adxPrev(adxLen), lookahead = barmerge.lookahead_on)
 
-// Laufende Wende im höheren Zeitrahmen gilt, wenn der nächsttiefere sie bestätigt hat
-eff4e = eff4 != 0 ? eff4 : (pendOk and pend4 != 0 and pend4 == effH ? pend4 : 0)
+// Laufende Wende gilt, wenn ein Nachbar-Zeitrahmen bestätigt in dieselbe Richtung zeigt
+eff4e = eff4 != 0 ? eff4 : (pendOk and pend4 != 0 and (pend4 == effD or pend4 == effH) ? pend4 : 0)
 effDe = effD != 0 ? effD : (pendOk and pendD != 0 and pendD == eff4e ? pendD : 0)
 pendUsed = effDe != effD or eff4e != eff4
 biasRaw = switch biasMode
@@ -803,16 +805,18 @@ if hitB
     touchedB := true
 
 // ---------------------------------------------------------------- Schritt 5: Kontakt mit der Suchzone
-inFib   = fibZoneOk and (bias == 1 ? (low <= zA and close >= z1) : (high >= zA and close <= z1))
-inSdNow = biasOk and not na(lastSdBar) and lastSdBar == bar_index and lastSdDir == bias
+// Kontakt wird je Richtung der 1H-Struktur gespeichert (unabhängig vom Bias); der Bias wird beim Bruch geprüft
+zoneDirOk = dirH != 0 and not na(zA) and not na(z1)
+inFib     = zoneDirOk and (dirH == 1 ? (low <= zA and close >= z1) : (high >= zA and close <= z1))
+inSdNow   = not na(lastSdBar) and lastSdBar == bar_index
 var int lastFibBar = na
 var int lastFibDir = 0
 if inFib
     lastFibBar := bar_index
-    lastFibDir := bias
+    lastFibDir := dirH
 fibRecent = biasOk and not na(lastFibBar) and bar_index - lastFibBar <= htfLook and lastFibDir == bias
 sdRecent  = biasOk and not na(lastSdBar) and bar_index - lastSdBar <= htfLook and lastSdDir == bias
-contactNow    = f_gate(inFib, inSdNow)
+contactNow    = biasOk and f_gate(inFib and dirH == bias, inSdNow and lastSdDir == bias)
 contactRecent = f_gate(fibRecent, sdRecent)
 contactAge    = fibRecent and sdRecent ? math.min(bar_index - lastFibBar, bar_index - lastSdBar) : fibRecent ? bar_index - lastFibBar : sdRecent ? bar_index - lastSdBar : na
 
@@ -890,6 +894,7 @@ type Setup
     int    chochBar = na
     int    readyBar = na
     int    tradeLeg = -1
+    int    brkSeq   = -1
     bool   isChoch  = true
     bool   originOk = false
     string reason   = ""
@@ -903,10 +908,20 @@ var Setup S = Setup.new()
 int  phPrev   = S.phase
 bool readyNow = false
 bool chochNow = brkC != 0 and chochC
-originP  = brkC == 1 ? legLoC : legHiC
+var int  brkSeq       = 0
+var int  lastBrkBar   = na
+var bool lastBrkChoch = false
+if brkC != 0
+    brkSeq       += 1
+    lastBrkBar   := bar_index
+    lastBrkChoch := chochC
+originP     = (brkC != 0 ? brkC : dirC) == 1 ? legLoC : legHiC
 originOkNow = not isLtf or not useHtfZone or not useOrigin or f_originOk(bias, originP)
-brkValid    = brkC != 0 and biasOk and brkC == bias and (not isLtf or not useHtfZone or (contactRecent and originOkNow))
+zoneReq     = not isLtf or not useHtfZone or (contactRecent and originOkNow)
+brkValid    = brkC != 0 and biasOk and brkC == bias and zoneReq
 chochValid  = brkValid and chochC
+// Bias erst nach dem Bruch erschienen: Bruch der letzten N Kerzen in Bias-Richtung zählt nach
+lateValid   = brkC == 0 and biasOk and dirC == bias and not na(lastBrkBar) and bar_index - lastBrkBar <= htfLook and zoneReq
 
 // 1) Rücksetzen: Bias weg oder Struktur gegen das Setup
 if not biasOk
@@ -926,13 +941,14 @@ if biasOk and (S.phase <= 2 or S.phase == 6)
         S.phase  := contactRecent ? 2 : 1
         S.reason := contactRecent ? "" : "warte auf Kontakt mit der Suchzone"
 
-// 3) Bestätigung durch CHoCH (oder BOS-Folgeimpuls in Zonennähe, wie v3.x)
-if biasOk and S.phase != 5 and S.phase != 0 and brkValid
+// 3) Bestätigung durch CHoCH (oder BOS-Folgeimpuls in Zonennähe, wie v3.x), ggf. nachträglich
+if biasOk and S.phase != 5 and S.phase != 0 and S.brkSeq != brkSeq and (brkValid or lateValid)
     S.phase    := 3
     S.dir      := bias
     S.legId    := legId
-    S.chochBar := bar_index
-    S.isChoch  := chochC
+    S.brkSeq   := brkSeq
+    S.chochBar := lastBrkBar
+    S.isChoch  := lastBrkChoch
     S.originOk := originOkNow
     S.reason   := ""
 
@@ -1193,7 +1209,7 @@ if showTbl and barstate.islast
     // 5 Preis in Zone
     string pTxt = ""
     if isLtf
-        pTxt := contactNow ? "in der Suchzone" : contactRecent ? "Kontakt vor " + str.tostring(contactAge) + " Kerzen (gilt " + str.tostring(htfLook) + ")" : "nicht erreicht"
+        pTxt := contactNow ? "in der Suchzone" : contactRecent ? "Kontakt vor " + str.tostring(contactAge) + " Kerzen (gilt " + str.tostring(htfLook) + ")" : fibZoneOk ? "nicht erreicht, Fib-Zone " + (bias == 1 ? "unter" : "über") + " dem Kurs" : "nicht erreicht"
     else
         pTxt := not validLeg ? "–" : dirC == 1 ? (close > lA ? "über Fib-Zone, warten" : close >= lB ? "in Zone " + str.tostring(fibA) + "–" + str.tostring(fibB) : close >= l1 ? "tiefer Rücksetzer" : "unter Fib 1, ungültig") : (close < lA ? "unter Fib-Zone, warten" : close <= lB ? "in Zone " + str.tostring(fibA) + "–" + str.tostring(fibB) : close <= l1 ? "tiefer Rücksetzer" : "über Fib 1, ungültig")
     bool pOk = isLtf ? contactRecent : (validLeg and ((dirC == 1 and close <= lA and close >= l1) or (dirC == -1 and close >= lA and close <= l1)))
@@ -1202,7 +1218,7 @@ if showTbl and barstate.islast
 
     // 6 CHoCH
     bool cOk = S.phase >= 3 and S.phase <= 5
-    string cTxt = cOk ? (S.isChoch ? "CHoCH" : "BOS") + " vor " + str.tostring(bar_index - S.chochBar) + " Kerzen" + (validLeg and not na(legAtr) ? " · Impuls " + str.tostring(legAtr, "#.0") + " ATR" : "") + (S.originOk ? " · aus der Zone" : "") + (legSweepV ? " · X " + legSweepT : "") : (chochNow ? "CHoCH ohne Zonenkontakt / gegen Bias" : "noch kein CHoCH in Bias-Richtung")
+    string cTxt = cOk ? (S.isChoch ? "CHoCH" : "BOS") + " vor " + str.tostring(bar_index - S.chochBar) + " Kerzen" + (validLeg and not na(legAtr) ? " · Impuls " + str.tostring(legAtr, "#.0") + " ATR" : "") + (S.originOk ? " · aus der Zone" : "") + (legSweepV ? " · X " + legSweepT : "") : (not na(lastBrkBar) and bar_index - lastBrkBar <= htfLook and dirC == bias ? (lastBrkChoch ? "CHoCH" : "BOS") + " vor " + str.tostring(bar_index - lastBrkBar) + " Kerzen, aber " + (not contactRecent ? "kein Zonenkontakt" : "Ursprung nicht in der Zone") : "noch kein CHoCH in Bias-Richtung")
     f_chk(tbl, r, isLtf ? "6 CHoCH 1–5M" : "6 Strukturwechsel", cOk, cTxt)
     r += 1
 

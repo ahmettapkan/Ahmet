@@ -1,6 +1,8 @@
-# RP Struktur & Zonen v4.0.1 – Blueprint 701 als Setup-Lebenszyklus
+# RP Struktur & Zonen v4.0.2 – Blueprint 701 als Setup-Lebenszyklus
 
 Stand: 12.11.2026 · Phase 1 (Kern) · Datei `RP_Struktur_Zonen_v4_0.pine`
+
+**v4.0.2:** Zonenkontakt wird je Richtung der 1H-Struktur gespeichert, unabhängig vom Bias. Erscheint der Bias erst nach dem CHoCH (z. B. 4H-Bestätigung zum Kerzenschluss), zählt ein Bruch der letzten N Kerzen in Bias-Richtung nach. Laufende Wende zählt, wenn Daily **oder** 1H bestätigt in dieselbe Richtung zeigen. Zeile 6 nennt jetzt den Grund, wenn ein Bruch nicht zählt.
 
 **v4.0.1:** Eine laufende Wende (↓? / ↑?) im Daily zählt als Richtung, sobald der 4H sie bestätigt hat, im 4H entsprechend mit dem 1H. Neue Eingabe „Laufende Wende zählt, wenn der nächsttiefere Zeitrahmen sie bestätigt“ (Standard an). Grund: Im Live-Test blockierte ein Daily „↓?“ bei bestätigtem 4H ↓ und 1H ↓ jedes Setup.
 
