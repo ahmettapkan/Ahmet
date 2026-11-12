@@ -1,6 +1,8 @@
-# RP Struktur & Zonen v4.0 – Blueprint 701 als Setup-Lebenszyklus
+# RP Struktur & Zonen v4.0.1 – Blueprint 701 als Setup-Lebenszyklus
 
 Stand: 12.11.2026 · Phase 1 (Kern) · Datei `RP_Struktur_Zonen_v4_0.pine`
+
+**v4.0.1:** Eine laufende Wende (↓? / ↑?) im Daily zählt als Richtung, sobald der 4H sie bestätigt hat, im 4H entsprechend mit dem 1H. Neue Eingabe „Laufende Wende zählt, wenn der nächsttiefere Zeitrahmen sie bestätigt“ (Standard an). Grund: Im Live-Test blockierte ein Daily „↓?“ bei bestätigtem 4H ↓ und 1H ↓ jedes Setup.
 
 ## Was v4 anders macht als v3.x
 

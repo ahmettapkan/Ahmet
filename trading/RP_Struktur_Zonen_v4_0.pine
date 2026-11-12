@@ -1,10 +1,12 @@
 //@version=6
 // ============================================================================
-// RP Struktur & Zonen v4.0  –  Blueprint 701 als Setup-Lebenszyklus
+// RP Struktur & Zonen v4.0.1  –  Blueprint 701 als Setup-Lebenszyklus
 //
 // Phase 1 (Kern). Aufbau entlang der Pre-Trade-Checkliste des Blueprints:
 //   Schritt 1  Bias: Daily + 4H bestimmen die Richtung, 1H liefert Kontext und Suchzone.
 //              Eine laufende 1H-Wende blockiert nicht, nur eine bestätigte Gegenwende.
+//              v4.0.1: Eine laufende Wende (↓? / ↑?) im Daily zählt als Richtung, wenn der 4H
+//              sie bestätigt hat; im 4H entsprechend, wenn der 1H sie bestätigt hat.
 //   Schritt 2  Struktur im Chart (BOS / CHoCH) mit derselben Funktion wie der Bias.
 //              Gegen den Trend zählt nur ein Schluss jenseits des Impulsursprungs (Fib 1).
 //   Schritt 3  Suchzone: Fib 0,5–1 des 1H-Impulses und/oder frische Demand/Supply (1H, 15M).
@@ -40,6 +42,7 @@ swLen4   = input.int(5, "Swing-Länge Richtung 2 (4H)", minval = 2, group = grp1
 swLenH   = input.int(5, "Swing-Länge Kontext (1H)", minval = 2, group = grp1)
 biasMode = input.string("Daily + 4H", "Bias gilt, wenn", options = ["Daily + 4H", "Daily + 4H + 1H", "Nur Daily"], group = grp1, tooltip = "Blueprint: Daily, 4H und 1H einheitlich. v4 nutzt den 1H als Kontext: eine laufende 1H-Wende (Rücksetzer) blockiert nicht, eine bestätigte 1H-Gegenwende schon (Schalter unten).")
 htfBlock = input.bool(true, "Bestätigte 1H-Gegenwende blockiert den Bias", group = grp1)
+pendOk   = input.bool(true, "Laufende Wende zählt, wenn der nächsttiefere Zeitrahmen sie bestätigt", group = grp1, tooltip = "Daily ↓? zählt als ↓, sobald der 4H bestätigt abwärts ist (4H ↓? entsprechend mit dem 1H). Ohne diese Regel blockiert eine Daily-Wende den Bias oft tagelang, bis das tiefere Hoch im Daily per Swing bestätigt ist. Aus = Verhalten v3.x.")
 protHtf  = input.bool(true, "Wende nur unter Fib 1 (geschütztes Tief/Hoch)", group = grp1, tooltip = "Gegen den Trend zählt nur ein Schluss jenseits des Impulsursprungs. Zwischentiefs im Rücksetzer kippen weder Bias noch Suchzone. Aus = Verhalten v3.8.")
 showFlip = input.bool(true, "Kipp-Level im Dashboard", group = grp1)
 
@@ -468,10 +471,14 @@ f_sdPrev(int len, float minI) =>
 [effH, trH, pendH, dirH, refH, fuH, fdH, hiH, loH] = request.security(syminfo.tickerid, tfH, f_structPrev(swLenH, protHtf), lookahead = barmerge.lookahead_on)
 adxH = request.security(syminfo.tickerid, tfH, f_adxPrev(adxLen), lookahead = barmerge.lookahead_on)
 
+// Laufende Wende im höheren Zeitrahmen gilt, wenn der nächsttiefere sie bestätigt hat
+eff4e = eff4 != 0 ? eff4 : (pendOk and pend4 != 0 and pend4 == effH ? pend4 : 0)
+effDe = effD != 0 ? effD : (pendOk and pendD != 0 and pendD == eff4e ? pendD : 0)
+pendUsed = effDe != effD or eff4e != eff4
 biasRaw = switch biasMode
-    "Daily + 4H"      => effD != 0 and effD == eff4 ? effD : 0
-    "Daily + 4H + 1H" => effD != 0 and effD == eff4 and eff4 == effH ? effD : 0
-    => effD
+    "Daily + 4H"      => effDe != 0 and effDe == eff4e ? effDe : 0
+    "Daily + 4H + 1H" => effDe != 0 and effDe == eff4e and eff4e == effH ? effDe : 0
+    => effDe
 htfOpp = htfBlock and biasRaw != 0 and pendH == 0 and trH == -biasRaw
 bias   = htfOpp ? 0 : biasRaw
 biasOk = bias != 0
@@ -1153,7 +1160,7 @@ if showTbl and barstate.islast
     r += 1
 
     // 1 Bias
-    f_chk(tbl, r, "1 Bias " + f_tfName(tfD) + " · " + f_tfName(tf4) + " · " + f_tfName(tfH), biasOk, f_arrP(effD, pendD) + " " + f_arrP(eff4, pend4) + " " + f_arrP(effH, pendH) + "  →  " + biasTxt + (htfOpp ? " (1H Gegentrend bestätigt)" : ""))
+    f_chk(tbl, r, "1 Bias " + f_tfName(tfD) + " · " + f_tfName(tf4) + " · " + f_tfName(tfH), biasOk, f_arrP(effD, pendD) + " " + f_arrP(eff4, pend4) + " " + f_arrP(effH, pendH) + "  →  " + biasTxt + (htfOpp ? " (1H Gegentrend bestätigt)" : pendUsed and biasOk ? " (laufende Wende, vom tieferen TF bestätigt)" : ""))
     r += 1
     if showFlip
         f_row(tbl, r, "   Kipp " + f_tfName(tfD), f_flip(effD, pendD, refD, fuD, fdD), 0)
