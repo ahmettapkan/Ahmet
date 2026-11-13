@@ -1,12 +1,13 @@
 //@version=6
 // ============================================================================
-// RP Struktur & Zonen v4.0.3  –  Blueprint 701 als Setup-Lebenszyklus
+// RP Struktur & Zonen v4.0.4  –  Blueprint 701 als Setup-Lebenszyklus
 //
 // Phase 1 (Kern). Aufbau entlang der Pre-Trade-Checkliste des Blueprints:
 //   Schritt 1  Bias: Daily + 4H bestimmen die Richtung, 1H liefert Kontext und Suchzone.
 //              Eine laufende 1H-Wende blockiert nicht, nur eine bestätigte Gegenwende.
 //              v4.0.1/2: Eine laufende Wende (↓? / ↑?) zählt als Richtung, wenn der nächsthöhere
 //              oder der nächsttiefere Zeitrahmen bestätigt in dieselbe Richtung zeigt.
+//   v4.0.4: Mindest-Impuls für die 1H-Fib-Zone (x ATR des 1H). Zu kleine Impulse ergeben keine Suchzone.
 //   v4.0.3: Die 1H-Fib-Zone wird nicht mehr als Band gezeichnet (Werte weiter im Dashboard, Zeile 3).
 //   v4.0.2: Zonenkontakt wird je Richtung der 1H-Struktur gespeichert, unabhängig vom Bias.
 //           Erscheint der Bias erst nach dem CHoCH, zählt ein Bruch der letzten N Kerzen nach.
@@ -58,6 +59,7 @@ protChart  = input.bool(true, "Chart ab 15M: CHoCH nur gegen geschütztes Hoch/T
 grp3        = "Schritt 3 · Suchzone"
 zoneGate    = input.string("Fib oder Demand/Supply", "Suchzone ist", options = ["Fib oder Demand/Supply", "Fib und Demand/Supply", "nur Fib 0,5–1", "nur Demand/Supply"], group = grp3)
 fibA        = input.float(0.5, "Fib-Zone beginnt bei", step = 0.01, group = grp3)
+htfMinImp   = input.float(1.0, "Mindest-Impuls der Fib-Zone (x ATR des Kontext-Zeitrahmens)", minval = 0, step = 0.1, group = grp3, tooltip = "Der 1H-Impuls, aus dem die Fib-Zone 0,5–1 gebildet wird, muss mindestens so groß sein. Zu kleine Impulse ergeben Zonen von wenigen Pips und keinen echten Rücksetzer. 0 = aus.")
 showZones   = input.bool(true, "Demand / Supply anzeigen", group = grp3)
 use15Zones  = input.bool(true, "15M-Zonen zusätzlich (Charts bis 15M)", group = grp3)
 showZonesLtf = input.bool(true, "Zonen auch im 1–5M anzeigen", group = grp3)
@@ -473,6 +475,7 @@ f_sdPrev(int len, float minI) =>
 [eff4, tr4, pend4, dir4, ref4, fu4, fd4, hi4, lo4] = request.security(syminfo.tickerid, tf4, f_structPrev(swLen4, protHtf), lookahead = barmerge.lookahead_on)
 [effH, trH, pendH, dirH, refH, fuH, fdH, hiH, loH] = request.security(syminfo.tickerid, tfH, f_structPrev(swLenH, protHtf), lookahead = barmerge.lookahead_on)
 adxH = request.security(syminfo.tickerid, tfH, f_adxPrev(adxLen), lookahead = barmerge.lookahead_on)
+atrH = request.security(syminfo.tickerid, tfH, ta.atr(14)[1], lookahead = barmerge.lookahead_on)
 
 // Laufende Wende gilt, wenn ein Nachbar-Zeitrahmen bestätigt in dieselbe Richtung zeigt
 eff4e = eff4 != 0 ? eff4 : (pendOk and pend4 != 0 and (pend4 == effD or pend4 == effH) ? pend4 : 0)
@@ -676,7 +679,9 @@ f_sdOverlap(int d, float zb, float zt) =>
 // Suchzone aus dem Kontext-Zeitrahmen (Fib fibA bis 1 des letzten 1H-Impulses)
 zA = dirH == 1 ? hiH - (hiH - loH) * fibA : dirH == -1 ? loH + (hiH - loH) * fibA : na
 z1 = dirH == 1 ? loH : dirH == -1 ? hiH : na
-fibZoneOk = biasOk and dirH == bias and not na(zA) and not na(z1)
+htfLegAtr = not na(hiH) and not na(loH) and not na(atrH) and atrH > 0 ? (hiH - loH) / atrH : na
+htfLegOk  = htfMinImp <= 0 or (not na(htfLegAtr) and htfLegAtr >= htfMinImp)
+fibZoneOk = biasOk and dirH == bias and not na(zA) and not na(z1) and htfLegOk
 sdZoneOk  = biasOk and f_hasZone(bias)
 f_gate(bool f, bool s) =>
     zoneGate == "Fib oder Demand/Supply" ? (f or s) : zoneGate == "Fib und Demand/Supply" ? (f and s) : zoneGate == "nur Fib 0,5–1" ? f : s
@@ -807,7 +812,7 @@ if hitB
 
 // ---------------------------------------------------------------- Schritt 5: Kontakt mit der Suchzone
 // Kontakt wird je Richtung der 1H-Struktur gespeichert (unabhängig vom Bias); der Bias wird beim Bruch geprüft
-zoneDirOk = dirH != 0 and not na(zA) and not na(z1)
+zoneDirOk = dirH != 0 and not na(zA) and not na(z1) and htfLegOk
 inFib     = zoneDirOk and (dirH == 1 ? (low <= zA and close >= z1) : (high >= zA and close <= z1))
 inSdNow   = not na(lastSdBar) and lastSdBar == bar_index
 var int lastFibBar = na
@@ -1190,9 +1195,11 @@ if showTbl and barstate.islast
     // 3 Zone
     string zTxt = ""
     if fibZoneOk
-        zTxt += "Fib " + str.tostring(fibA) + "–1 " + f_tfName(tfH) + " " + f_px(z1) + "–" + f_px(zA)
+        zTxt += "Fib " + str.tostring(fibA) + "–1 " + f_tfName(tfH) + " " + f_px(z1) + "–" + f_px(zA) + (na(htfLegAtr) ? "" : " (" + str.tostring(htfLegAtr, "#.0") + " ATR)")
     if sdZoneOk
         zTxt += (zTxt == "" ? "" : " · ") + (bias == 1 ? "Demand" : "Supply") + " frisch"
+    if dirH == bias and not htfLegOk and not na(htfLegAtr)
+        zTxt += (zTxt == "" ? "" : " · ") + f_tfName(tfH) + "-Impuls zu klein (" + str.tostring(htfLegAtr, "#.0") + " ATR, min. " + str.tostring(htfMinImp, "#.0") + ")"
     if zTxt == ""
         zTxt := not biasOk ? "kein Bias" : dirH != bias ? f_tfName(tfH) + "-Struktur " + f_dirTxt(dirH) + ", keine Fib-Zone" : "keine Zone in Bias-Richtung"
     f_chk(tbl, r, "3 Zone im Trendkontext", zoneOk, zTxt)
