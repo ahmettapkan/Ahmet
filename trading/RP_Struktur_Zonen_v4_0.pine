@@ -1,12 +1,13 @@
 //@version=6
 // ============================================================================
-// RP Struktur & Zonen v4.0.2  –  Blueprint 701 als Setup-Lebenszyklus
+// RP Struktur & Zonen v4.0.3  –  Blueprint 701 als Setup-Lebenszyklus
 //
 // Phase 1 (Kern). Aufbau entlang der Pre-Trade-Checkliste des Blueprints:
 //   Schritt 1  Bias: Daily + 4H bestimmen die Richtung, 1H liefert Kontext und Suchzone.
 //              Eine laufende 1H-Wende blockiert nicht, nur eine bestätigte Gegenwende.
 //              v4.0.1/2: Eine laufende Wende (↓? / ↑?) zählt als Richtung, wenn der nächsthöhere
 //              oder der nächsttiefere Zeitrahmen bestätigt in dieselbe Richtung zeigt.
+//   v4.0.3: Die 1H-Fib-Zone wird nicht mehr als Band gezeichnet (Werte weiter im Dashboard, Zeile 3).
 //   v4.0.2: Zonenkontakt wird je Richtung der 1H-Struktur gespeichert, unabhängig vom Bias.
 //           Erscheint der Bias erst nach dem CHoCH, zählt ein Bruch der letzten N Kerzen nach.
 //   Schritt 2  Struktur im Chart (BOS / CHoCH) mit derselben Funktion wie der Bias.
@@ -1059,7 +1060,6 @@ plot(dirC, "Struktur-Trend Chart", display = display.data_window)
 var array<line>  drawL = array.new<line>()
 var array<label> drawT = array.new<label>()
 var box gz = na
-var box hz = na
 
 f_hline(array<line> ls, array<label> ts, int x1, int x2, float y, color col, string txt, int w, string sty) =>
     array.push(ls, line.new(x1, y, x2, y, color = col, width = w, style = sty))
@@ -1073,11 +1073,7 @@ if barstate.islast
         label.delete(lb)
     array.clear(drawT)
     box.delete(gz)
-    box.delete(hz)
     x2 = bar_index + 15
-    // Suchzone des Kontext-Zeitrahmens im Entry-Chart
-    if isLtf and fibZoneOk
-        hz := box.new(bar_index - htfLook, math.max(zA, z1), x2, math.min(zA, z1), border_color = color.new(color.orange, 60), bgcolor = color.new(color.orange, 92), text = f_tfName(tfH) + " Fib " + str.tostring(fibA) + "–1", text_color = color.new(color.orange, 0), text_size = size.tiny, text_halign = text.align_left, text_valign = bias == 1 ? text.align_top : text.align_bottom)
     if showFib and validLeg
         x1 = math.min(legLoBarC, legHiBarC)
         gz := box.new(x1, math.max(lA, lB), x2, math.min(lA, lB), border_color = colNone, bgcolor = color.new(colEnt, 90))
