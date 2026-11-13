@@ -1,0 +1,1339 @@
+//@version=6
+// ============================================================================
+// RP Struktur & Zonen v4.0.4  –  Blueprint 701 als Setup-Lebenszyklus
+//
+// Phase 1 (Kern). Aufbau entlang der Pre-Trade-Checkliste des Blueprints:
+//   Schritt 1  Bias: Daily + 4H bestimmen die Richtung, 1H liefert Kontext und Suchzone.
+//              Eine laufende 1H-Wende blockiert nicht, nur eine bestätigte Gegenwende.
+//              v4.0.1/2: Eine laufende Wende (↓? / ↑?) zählt als Richtung, wenn der nächsthöhere
+//              oder der nächsttiefere Zeitrahmen bestätigt in dieselbe Richtung zeigt.
+//   v4.0.4: Mindest-Impuls für die 1H-Fib-Zone (x ATR des 1H). Zu kleine Impulse ergeben keine Suchzone.
+//   v4.0.3: Die 1H-Fib-Zone wird nicht mehr als Band gezeichnet (Werte weiter im Dashboard, Zeile 3).
+//   v4.0.2: Zonenkontakt wird je Richtung der 1H-Struktur gespeichert, unabhängig vom Bias.
+//           Erscheint der Bias erst nach dem CHoCH, zählt ein Bruch der letzten N Kerzen nach.
+//   Schritt 2  Struktur im Chart (BOS / CHoCH) mit derselben Funktion wie der Bias.
+//              Gegen den Trend zählt nur ein Schluss jenseits des Impulsursprungs (Fib 1).
+//   Schritt 3  Suchzone: Fib 0,5–1 des 1H-Impulses und/oder frische Demand/Supply (1H, 15M).
+//   Schritt 4  Confluence an der Suchzone: Demand/Supply, PDH/PDL, Asia, VWAP, FVG.
+//   Schritt 5  Kontakt: Preis in der Zone, Kontakt gilt N Kerzen.
+//   Schritt 6  Bestätigung: CHoCH im 1–5M aus der Zone heraus, Mindest-Impuls, ADX,
+//              optional Abgriff, Umkehrmuster, CVD-Divergenz.
+//   Schritt 7  Zeit: Handelsfenster London / New York, News-Sperre.
+//   Schritt 8  Plan: Entry 0,71 | SL Fib 1 | TP, CRV >= 1:3, Tages- und Wochenlimit in R.
+//
+// Setup-Lebenszyklus (jede Änderung mit Grund im Dashboard):
+//   0 KEIN SETUP -> 1 WARTEN -> 2 KONTAKT -> 3 BESTÄTIGT -> 4 BEREIT -> 5 AKTIV -> 6 BEENDET
+//
+// Dashboard = Checkliste des Skills "setup-check-701" (8 Zeilen mit Status), dazu Phase,
+// Qualität, Trade-Plan, Limits und virtuelle Statistik. Alarme in festem Feldformat.
+// Phase 2 (geplant): Setup-Typ 15M-Limit, Positionsgröße in Lots, Korrelationshinweis.
+// Phase 3 (geplant): AMD-Kontext (Accumulation / Manipulation / Distribution), Journal-Export.
+// ============================================================================
+indicator("RP Struktur & Zonen v4", shorttitle = "RP4", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 300, max_bars_back = 2000)
+
+// ---------------------------------------------------------------- Eingaben
+grpPre     = "Markt-Preset"
+presetSel  = input.string("Automatisch", "Preset", options = ["Automatisch", "Gold", "Silber", "Öl", "Nasdaq", "EUR/USD", "GBP/USD", "Dow Jones", "DAX", "Bitcoin", "Solana", "Manuell"], group = grpPre, tooltip = "Automatisch erkennt den Markt am Symbol und setzt ADX-Mindestwert, Asia-Anzeige und ★-Zonenpflicht. Manuell = Werte aus den Gruppen unten.")
+autoSwing  = input.bool(true, "Swing-Länge automatisch (bis 5M: 3, sonst 5)", group = grpPre)
+autoAlerts = input.bool(true, "Alarm-Profil automatisch nach Zeitrahmen", group = grpPre, tooltip = "Bis 5M: CHoCH + Setup bereit. Ab 15M: Bias-Wechsel, Zonen, Fib. Im 15M zusätzlich Setup bereit.")
+
+grp1     = "Schritt 1 · Bias (höhere Zeitrahmen)"
+tfD      = input.timeframe("D",   "Zeitrahmen Richtung 1", group = grp1)
+tf4      = input.timeframe("240", "Zeitrahmen Richtung 2", group = grp1)
+tfH      = input.timeframe("60",  "Zeitrahmen Kontext / Suchzone", group = grp1)
+swLenD   = input.int(3, "Swing-Länge Richtung 1 (Daily)", minval = 2, group = grp1)
+swLen4   = input.int(5, "Swing-Länge Richtung 2 (4H)", minval = 2, group = grp1)
+swLenH   = input.int(5, "Swing-Länge Kontext (1H)", minval = 2, group = grp1)
+biasMode = input.string("Daily + 4H", "Bias gilt, wenn", options = ["Daily + 4H", "Daily + 4H + 1H", "Nur Daily"], group = grp1, tooltip = "Blueprint: Daily, 4H und 1H einheitlich. v4 nutzt den 1H als Kontext: eine laufende 1H-Wende (Rücksetzer) blockiert nicht, eine bestätigte 1H-Gegenwende schon (Schalter unten).")
+htfBlock = input.bool(true, "Bestätigte 1H-Gegenwende blockiert den Bias", group = grp1)
+pendOk   = input.bool(true, "Laufende Wende zählt, wenn ein Nachbar-Zeitrahmen sie bestätigt", group = grp1, tooltip = "4H ↓? zählt als ↓, wenn Daily oder 1H bestätigt abwärts sind. Daily ↓? zählt als ↓, wenn der 4H (bestätigt oder nach dieser Regel) abwärts ist. Ohne diese Regel blockiert eine laufende Wende den Bias oft stundenlang, bis das tiefere Hoch per Swing bestätigt ist. Aus = Verhalten v3.x.")
+protHtf  = input.bool(true, "Wende nur unter Fib 1 (geschütztes Tief/Hoch)", group = grp1, tooltip = "Gegen den Trend zählt nur ein Schluss jenseits des Impulsursprungs. Zwischentiefs im Rücksetzer kippen weder Bias noch Suchzone. Aus = Verhalten v3.8.")
+showFlip = input.bool(true, "Kipp-Level im Dashboard", group = grp1)
+
+grp2       = "Schritt 2 · Struktur im Chart"
+swLenIn    = input.int(5, "Swing-Länge (manuell)", minval = 2, group = grp2)
+showStr    = input.bool(true, "BOS / CHoCH anzeigen", group = grp2)
+showSweepX = input.bool(true, "Liquiditätsabgriff (X) markieren", group = grp2)
+protChart  = input.bool(true, "Chart ab 15M: CHoCH nur gegen geschütztes Hoch/Tief", group = grp2, tooltip = "Im 1–5M-Entry-Chart bleibt der frühe CHoCH am letzten Swing (Blueprint Schritt 6).")
+
+grp3        = "Schritt 3 · Suchzone"
+zoneGate    = input.string("Fib oder Demand/Supply", "Suchzone ist", options = ["Fib oder Demand/Supply", "Fib und Demand/Supply", "nur Fib 0,5–1", "nur Demand/Supply"], group = grp3)
+fibA        = input.float(0.5, "Fib-Zone beginnt bei", step = 0.01, group = grp3)
+htfMinImp   = input.float(1.0, "Mindest-Impuls der Fib-Zone (x ATR des Kontext-Zeitrahmens)", minval = 0, step = 0.1, group = grp3, tooltip = "Der 1H-Impuls, aus dem die Fib-Zone 0,5–1 gebildet wird, muss mindestens so groß sein. Zu kleine Impulse ergeben Zonen von wenigen Pips und keinen echten Rücksetzer. 0 = aus.")
+showZones   = input.bool(true, "Demand / Supply anzeigen", group = grp3)
+use15Zones  = input.bool(true, "15M-Zonen zusätzlich (Charts bis 15M)", group = grp3)
+showZonesLtf = input.bool(true, "Zonen auch im 1–5M anzeigen", group = grp3)
+sdImp       = input.float(1.5, "Mindest-Impuls aus der Zone (x ATR des Zonen-Zeitrahmens)", minval = 0, step = 0.1, group = grp3)
+maxZones    = input.int(6, "Max. aktive Zonen je Seite", minval = 1, maxval = 20, group = grp3)
+onlySweepIn = input.bool(false, "Nur Zonen nach Liquiditätsabgriff (★)", group = grp3)
+onlyFresh   = input.bool(true, "Nur ungetestete Zonen zählen", group = grp3)
+showPD      = input.bool(true, "Vortageshoch / -tief (PDH / PDL)", group = grp3)
+showAsiaIn  = input.bool(true, "Asia-Session Hoch / Tief", group = grp3)
+asiaSess    = input.session("0100-0900", "Asia-Session", group = grp3)
+asiaTz      = input.string("Europe/Berlin", "Zeitzone Asia-Session", group = grp3)
+useVwap     = input.bool(true, "Tages-VWAP als Confluence", group = grp3)
+showVwap    = input.bool(true, "VWAP anzeigen", group = grp3)
+useFvg      = input.bool(true, "Fair Value Gaps als Confluence", group = grp3)
+showFvg     = input.bool(true, "FVG anzeigen", group = grp3)
+fvgMin      = input.float(0.1, "FVG-Mindestgröße (x ATR)", minval = 0, step = 0.05, group = grp3)
+
+grp4     = "Schritt 4 · Confluence & Qualität"
+minConf  = input.int(1, "Mindest-Faktoren neben Fib", minval = 0, maxval = 5, group = grp4, tooltip = "Blueprint: mindestens zwei Faktoren. 1 = Fib + ein weiterer (Demand/Supply, PDH/PDL, Asia, VWAP, FVG). Im Entry-Chart wird an der 1H-Suchzone gemessen.")
+minGrade = input.string("C", "Mindest-Setup-Qualität", options = ["C", "B", "A"], group = grp4, tooltip = "Punkte (max. 6): Abgriff, ★-Zone, 2+ Faktoren, 3+ Faktoren, Umkehrmuster, CVD-Divergenz. A = 4–6, B = 2–3, C = 0–1.")
+usePat   = input.bool(true, "Umkehrmuster am Impulsursprung prüfen", group = grp4)
+pinRatio = input.float(2.0, "Pin-Bar: Docht mind. x Körper", minval = 1, step = 0.1, group = grp4)
+useCvd   = input.bool(true, "CVD-Divergenz prüfen", group = grp4)
+cvdSrc   = input.string("Intrabar", "CVD-Quelle", options = ["Intrabar", "Kerzen-Schätzung"], group = grp4)
+
+grp5     = "Schritt 5 · Kontakt"
+useHtfZone = input.bool(true, "Entry-Chart: CHoCH nur nach Kontakt mit der Suchzone", group = grp5)
+htfLook  = input.int(40, "Kontakt gilt für (Kerzen im Entry-Chart)", minval = 1, group = grp5, tooltip = "3M-Chart: 40 Kerzen = 2 Stunden.")
+useOrigin = input.bool(true, "Impuls muss in der Suchzone starten", group = grp5)
+
+grp6     = "Schritt 6 · Bestätigung"
+minImp   = input.float(2.0, "Mindest-Impuls des CHoCH (x ATR)", minval = 0, step = 0.1, group = grp6)
+useSide  = input.bool(true, "Seitwärtsfilter (ADX im Kontext-Zeitrahmen)", group = grp6)
+adxLen   = input.int(14, "ADX-Länge", minval = 1, group = grp6)
+adxMinIn = input.int(20, "ADX-Mindestwert (nur Preset Manuell)", minval = 1, group = grp6)
+reqSweep = input.bool(false, "Liquiditätsabgriff ist Pflicht", group = grp6)
+reqPatIn = input.bool(false, "Umkehrmuster ist Pflicht", group = grp6)
+reqCvd   = input.bool(false, "CVD-Divergenz ist Pflicht", group = grp6)
+maxWait  = input.int(40, "Setup verfällt nach (Kerzen ohne Entry)", minval = 0, group = grp6)
+
+grp7     = "Schritt 7 · Zeit"
+useWin   = input.bool(true, "Nur in den Handelsfenstern (Charts bis 15M)", group = grp7)
+winAName = input.string("London", "Name Fenster 1", group = grp7)
+winA     = input.session("0900-1100:23456", "Fenster 1", group = grp7)
+winBName = input.string("New York", "Name Fenster 2", group = grp7)
+winB     = input.session("1430-1700:23456", "Fenster 2", group = grp7)
+winTz    = input.string("Europe/Berlin", "Zeitzone der Fenster", group = grp7)
+useNews  = input.bool(true, "NFP (1. Freitag 08:30 NY) und EIA-Öl (Mi 10:30 NY) sperren", group = grp7)
+newsPad  = input.int(15, "Sperre ± Minuten", minval = 0, maxval = 120, group = grp7)
+useCust  = input.bool(false, "Eigene Sperrzeit aktiv (z. B. CPI, Fed)", group = grp7)
+custSess = input.session("1415-1445", "Eigene Sperrzeit", group = grp7)
+custTz   = input.string("Europe/Berlin", "Zeitzone eigene Sperrzeit", group = grp7)
+
+grp8     = "Schritt 8 · Trade-Plan & Risiko"
+showFib  = input.bool(true, "Fibonacci des CHoCH-Impulses zeichnen", group = grp8)
+fibB     = input.float(0.71,  "Entry-Level", step = 0.01, group = grp8)
+fibTP    = input.float(-0.17, "Take-Profit-Extension", step = 0.01, group = grp8)
+slBuf    = input.float(0.0, "SL-Puffer (x ATR)", minval = 0, step = 0.05, group = grp8)
+tpMode   = input.string("Fib-Extension", "Take-Profit", options = ["Fib-Extension", "CRV fix"], group = grp8)
+crvT     = input.float(3.0, "CRV-Ziel", minval = 1, step = 0.1, group = grp8)
+reqCrv   = input.bool(true, "CRV-Ziel ist Pflicht", group = grp8)
+dayLimR  = input.float(2.0, "Tageslimit (R, 0 = aus)", minval = 0, step = 0.5, group = grp8, tooltip = "Blueprint: nach −2 R am Tag keine neuen Setups.")
+weekLimR = input.float(5.0, "Wochenlimit (R, 0 = aus)", minval = 0, step = 0.5, group = grp8, tooltip = "Blueprint: nach −5 R in der Woche keine neuen Setups.")
+showPlan = input.bool(true, "Entry / SL / TP beschriften", group = grp8)
+
+grpAl      = "Alarme (ein Alarm für alles)"
+alBiasIn   = input.bool(true,  "Bias-Wechsel", group = grpAl)
+alChochIn  = input.bool(true,  "CHoCH aus der Suchzone (Phase BESTÄTIGT)", group = grpAl)
+alZoneIn   = input.bool(true,  "Suchzone erreicht (Phase KONTAKT)", group = grpAl)
+alReadyIn  = input.bool(true,  "Setup bereit (Limit-Order setzen)", group = grpAl)
+alPhase    = input.bool(false, "Jeder Phasenwechsel", group = grpAl)
+alTrade    = input.bool(false, "Virtueller Trade: Entry / TP / SL", group = grpAl)
+
+grpSt      = "Statistik"
+showStat   = input.bool(true, "Virtuelle Statistik im Dashboard", group = grpSt)
+showStatX  = input.bool(true, "Trefferquote nach Qualität und Session", group = grpSt)
+showMarks  = input.bool(true, "Virtuelle Trades im Chart markieren", group = grpSt)
+showJour   = input.bool(true, "Journal anzeigen", group = grpSt)
+jRows      = input.int(8, "Einträge im Journal", minval = 1, maxval = 20, group = grpSt)
+jPosIn     = input.string("Unten links", "Position Journal", options = ["Unten links", "Unten rechts", "Oben links", "Oben rechts"], group = grpSt)
+
+grpD    = "Anzeige"
+showTbl = input.bool(true, "Dashboard anzeigen", group = grpD)
+showDet = input.bool(true, "Filter-Details anzeigen", group = grpD)
+tblPos  = input.string("Oben rechts", "Position", options = ["Oben rechts", "Unten rechts", "Oben links", "Unten links"], group = grpD)
+tblSize = input.string("Klein", "Schriftgröße", options = ["Sehr klein", "Klein", "Normal"], group = grpD)
+
+// ---------------------------------------------------------------- Preset und Profil
+tk = syminfo.ticker
+detected = str.contains(tk, "XAU") or str.contains(tk, "GOLD") ? "Gold" :
+     str.contains(tk, "XAG") or str.contains(tk, "SILVER") or tk == "SI1!" or tk == "SIL1!" ? "Silber" :
+     str.contains(tk, "OIL") or str.contains(tk, "WTI") or str.contains(tk, "BRENT") or str.contains(tk, "XTI") or str.contains(tk, "XBR") or str.contains(tk, "BCO") or tk == "CL1!" or tk == "MCL1!" or tk == "BRN1!" ? "Öl" :
+     str.contains(tk, "NAS100") or str.contains(tk, "US100") or str.contains(tk, "USTEC") or str.contains(tk, "NDX") or str.startswith(tk, "NQ") or str.startswith(tk, "MNQ") ? "Nasdaq" :
+     str.contains(tk, "EURUSD") ? "EUR/USD" :
+     str.contains(tk, "GBPUSD") ? "GBP/USD" :
+     str.contains(tk, "US30") or str.contains(tk, "WS30") or str.contains(tk, "DJ30") or str.contains(tk, "DJI") or str.startswith(tk, "YM") or str.startswith(tk, "MYM") ? "Dow Jones" :
+     str.contains(tk, "DE30") or str.contains(tk, "DE40") or str.contains(tk, "GER30") or str.contains(tk, "GER40") or str.contains(tk, "DAX") or str.startswith(tk, "FDAX") or str.startswith(tk, "FDXM") ? "DAX" :
+     str.startswith(tk, "BTC") or str.startswith(tk, "XBT") ? "Bitcoin" :
+     str.startswith(tk, "SOL") ? "Solana" : "Manuell"
+preset    = presetSel == "Automatisch" ? detected : presetSel
+isMan     = preset == "Manuell"
+isFx      = preset == "EUR/USD" or preset == "GBP/USD"
+isCrypto  = preset == "Bitcoin" or preset == "Solana"
+isIndex   = preset == "Nasdaq" or preset == "Dow Jones" or preset == "DAX"
+isLtf     = timeframe.in_seconds() <= 300
+isEntryTf = timeframe.in_seconds() <= 900
+isIntra   = timeframe.isintraday
+zVis      = showZones and (showZonesLtf or not isLtf)
+
+swLen          = autoSwing ? (isLtf ? 3 : 5) : swLenIn
+onlySweepZones = isMan ? onlySweepIn : preset == "GBP/USD" or preset == "Silber" or preset == "Öl" or isCrypto
+showAsia       = isMan ? showAsiaIn : not isIndex and preset != "Öl"
+adxMin         = isMan ? adxMinIn : isFx ? 18 : preset == "Silber" or isCrypto ? 22 : 20
+reqPatE        = usePat and reqPatIn
+reqCvdE        = useCvd and reqCvd
+useProtC       = protChart and not isLtf
+
+alBias  = autoAlerts ? not isLtf : alBiasIn
+alChoch = autoAlerts ? isLtf : alChochIn
+alZone  = autoAlerts ? not isLtf : alZoneIn
+alReady = autoAlerts ? isEntryTf : alReadyIn
+
+colBull = color.new(#26a69a, 0)
+colBear = color.new(#ef5350, 0)
+colFib  = color.new(color.gray, 0)
+colEnt  = color.new(#2962ff, 0)
+colNone = color.new(color.black, 100)
+
+tickDec = math.max(0, math.min(8, math.round(-math.log10(syminfo.mintick) + 0.4)))
+f_px(float x) =>
+    string res = "–"
+    if not na(x)
+        int dec = math.min(tickDec, math.abs(x) >= 1000 ? 2 : math.abs(x) >= 10 ? 3 : 5)
+        res := str.tostring(math.round_to_mintick(x), dec > 0 ? "#,##0." + str.repeat("0", dec) : "#,##0")
+    res
+
+f_tfName(string tf) =>
+    tf == "D" or tf == "1D" ? "Daily" : tf == "W" or tf == "1W" ? "Weekly" : tf == "240" ? "4H" : tf == "60" ? "1H" : tf == "15" ? "15M" : tf
+
+f_dirTxt(int b) =>
+    b == 1 ? "aufwärts" : b == -1 ? "abwärts" : "unklar"
+
+// ---------------------------------------------------------------- Hilfsfunktionen (Pivots, Muster)
+f_prevPivot(array<float> vals, array<int> bars, int beforeBar) =>
+    float res = na
+    int n = array.size(vals)
+    if n > 0
+        for i = n - 1 to 0
+            if array.get(bars, i) < beforeBar
+                res := array.get(vals, i)
+                break
+    res
+
+f_prevPivotBar(array<int> bars, int beforeBar) =>
+    int res = na
+    int n = array.size(bars)
+    if n > 0
+        for i = n - 1 to 0
+            if array.get(bars, i) < beforeBar
+                res := array.get(bars, i)
+                break
+    res
+
+f_patAt(int k, int dir) =>
+    o  = open[k]
+    c  = close[k]
+    h  = high[k]
+    l  = low[k]
+    o1 = open[k + 1]
+    c1 = close[k + 1]
+    o2 = open[k + 2]
+    c2 = close[k + 2]
+    rng  = h - l
+    body = math.abs(c - o)
+    upW  = h - math.max(o, c)
+    loW  = math.min(o, c) - l
+    string res = ""
+    if rng > 0
+        if dir == 1
+            if c > o and c1 < o1 and c >= o1 and o <= c1
+                res := "Engulfing"
+            else if loW >= pinRatio * math.max(body, rng * 0.05) and upW <= rng * 0.3
+                res := "Hammer"
+            else if c2 < o2 and math.abs(c1 - o1) <= math.abs(c2 - o2) * 0.4 and c > o and c >= (o2 + c2) / 2
+                res := "Morning Star"
+        else
+            if c < o and c1 > o1 and c <= o1 and o >= c1
+                res := "Engulfing"
+            else if upW >= pinRatio * math.max(body, rng * 0.05) and loW <= rng * 0.3
+                res := "Shooting Star"
+            else if c2 > o2 and math.abs(c1 - o1) <= math.abs(c2 - o2) * 0.4 and c < o and c <= (o2 + c2) / 2
+                res := "Evening Star"
+    res
+
+f_pattern(int off, int dir) =>
+    string res = ""
+    for j = 0 to 2
+        k = off - j
+        if k >= 0 and res == ""
+            res := f_patAt(k, dir)
+    res
+
+// ---------------------------------------------------------------- Eine Strukturfunktion für alle Zeitrahmen
+// dirNow: Struktur-Richtung nach dem letzten Bruch (sofort, für Chart und Suchzone)
+// tr / pend / eff: bestätigter Trend (HH+HL bzw. LH+LL) für den Bias, laufende Wende = eff 0
+// legHi / legLo: letzter Impuls in Richtung dirNow (Fib 0 / Fib 1)
+// Gegen dirNow zählt bei prot nur ein Schluss jenseits des Impulsursprungs, mit dirNow der letzte Swing (BOS)
+f_struct(int len, bool prot) =>
+    ph_ = ta.pivothigh(high, len, len)
+    pl_ = ta.pivotlow(low, len, len)
+    var float sh       = na
+    var int   shBar    = na
+    var float sl       = na
+    var int   slBar    = na
+    var int   dirNow   = 0
+    var int   tr       = 0
+    var int   pend     = 0
+    var float refLv    = na
+    var int   brkBar   = na
+    var float legHi    = na
+    var float legLo    = na
+    var int   legHiBar = na
+    var int   legLoBar = na
+    if not na(ph_)
+        sh    := ph_
+        shBar := bar_index - len
+    if not na(pl_)
+        sl    := pl_
+        slBar := bar_index - len
+    nH = na(shBar) ? 1 : math.max(1, math.min(bar_index - shBar + 1, 500))
+    nL = na(slBar) ? 1 : math.max(1, math.min(bar_index - slBar + 1, 500))
+    lowSince     = ta.lowest(low, nH)
+    lowSinceBar  = bar_index + ta.lowestbars(low, nH)
+    highSince    = ta.highest(high, nL)
+    highSinceBar = bar_index + ta.highestbars(high, nL)
+    // Laufende Wende bestätigen oder verwerfen
+    if pend == 1
+        if close < refLv
+            pend := 0
+        else if not na(pl_) and bar_index - len > brkBar and pl_ > refLv
+            tr   := 1
+            pend := 0
+    else if pend == -1
+        if close > refLv
+            pend := 0
+        else if not na(ph_) and bar_index - len > brkBar and ph_ < refLv
+            tr   := -1
+            pend := 0
+    // Strukturbruch
+    bool bullTrig = dirNow == -1 and prot ? (not na(legHi) and close > legHi) : (not na(sh) and close > sh)
+    bool bearTrig = dirNow == 1 and prot ? (not na(legLo) and close < legLo) : (not na(sl) and close < sl)
+    int   brk    = 0
+    bool  choch  = false
+    float brkLvl = na
+    int   brkAt  = na
+    if bullTrig
+        bool viaProt = dirNow == -1 and prot
+        brk    := 1
+        choch  := dirNow != 1
+        brkLvl := viaProt ? legHi : sh
+        brkAt  := viaProt ? legHiBar : shBar
+        float nLo    = viaProt ? legLo : lowSince
+        int   nLoBar = viaProt ? legLoBar : lowSinceBar
+        if tr != 1
+            pend   := 1
+            refLv  := nLo
+            brkBar := bar_index
+        dirNow   := 1
+        legLo    := nLo
+        legLoBar := nLoBar
+        legHi    := high
+        legHiBar := bar_index
+        sh := na
+    else if bearTrig
+        bool viaProt = dirNow == 1 and prot
+        brk    := -1
+        choch  := dirNow != -1
+        brkLvl := viaProt ? legLo : sl
+        brkAt  := viaProt ? legLoBar : slBar
+        float nHi    = viaProt ? legHi : highSince
+        int   nHiBar = viaProt ? legHiBar : highSinceBar
+        if tr != -1
+            pend   := -1
+            refLv  := nHi
+            brkBar := bar_index
+        dirNow   := -1
+        legHi    := nHi
+        legHiBar := nHiBar
+        legLo    := low
+        legLoBar := bar_index
+        sl := na
+    else
+        if dirNow == 1 and high > legHi
+            legHi    := high
+            legHiBar := bar_index
+        if dirNow == -1 and low < legLo
+            legLo    := low
+            legLoBar := bar_index
+    eff    = pend != 0 ? 0 : tr
+    flipUp = pend == 0 and tr != 1 ? (dirNow == -1 and prot ? legHi : sh) : na
+    flipDn = pend == 0 and tr != -1 ? (dirNow == 1 and prot ? legLo : sl) : na
+    [eff, tr, pend, dirNow, refLv, flipUp, flipDn, legHi, legLo, legHiBar, legLoBar, brk, choch, brkLvl, brkAt]
+
+f_structPrev(int len, bool prot) =>
+    [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15] = f_struct(len, prot)
+    [a1[1], a2[1], a3[1], a4[1], a5[1], a6[1], a7[1], a8[1], a9[1]]
+
+f_adxPrev(int len) =>
+    [dp, dm, ax] = ta.dmi(len, len)
+    ax[1]
+
+// ---------------------------------------------------------------- Supply & Demand (Methode v3.x, unverändert)
+f_sdZones(int len, float minI) =>
+    ph_  = ta.pivothigh(high, len, len)
+    pl_  = ta.pivotlow(low, len, len)
+    atr_ = ta.atr(14)
+    var float dayLo = na
+    var float dayHi = na
+    var float pdL   = na
+    var float pdH   = na
+    if timeframe.change("D")
+        pdL   := dayLo
+        pdH   := dayHi
+        dayLo := low
+        dayHi := high
+    else
+        dayLo := na(dayLo) ? low : math.min(dayLo, low)
+        dayHi := na(dayHi) ? high : math.max(dayHi, high)
+    inAs = not na(time(timeframe.period, asiaSess, asiaTz))
+    var float aHi = na
+    var float aLo = na
+    if inAs and not inAs[1]
+        aHi := high
+        aLo := low
+    else if inAs
+        aHi := math.max(aHi, high)
+        aLo := math.min(aLo, low)
+    asDone = showAsia and not inAs and not na(aLo)
+    var float sh = na
+    var int   shBar = na
+    var float sl = na
+    var int   slBar = na
+    var float lastPh = na
+    var float lastPl = na
+    var float plBeforeSh = na
+    var float phBeforeSl = na
+    var float dTop  = na
+    var float dBot  = na
+    var int   dTime = na
+    var bool  dStr  = false
+    var float sTop  = na
+    var float sBot  = na
+    var int   sTime = na
+    var bool  sStr  = false
+    if not na(ph_)
+        plBeforeSh := lastPl
+        sh     := ph_
+        shBar  := bar_index - len
+        lastPh := ph_
+    if not na(pl_)
+        phBeforeSl := lastPh
+        sl     := pl_
+        slBar  := bar_index - len
+        lastPl := pl_
+    if not na(sh) and close > sh
+        int span = math.min(bar_index - shBar, 300)
+        float lo = low
+        int k    = 0
+        for i = 0 to span
+            if low[i] < lo
+                lo := low[i]
+                k  := i
+        if close - lo >= minI * atr_
+            float top = math.max(open[k], close[k])
+            if k > 1
+                for j = k - 1 to math.max(k - 12, 1)
+                    if close[j] > open[j] and close[j] - open[j] >= 0.8 * atr_
+                        break
+                    top := math.max(top, math.max(open[j], close[j]))
+            dBot  := lo
+            dTop  := math.min(math.max(top, lo + 0.25 * atr_), lo + 1.5 * atr_)
+            dTime := time[k]
+            dStr  := (not na(plBeforeSh) and lo < plBeforeSh) or (not na(pdL) and lo < pdL and close > pdL) or (asDone and lo < aLo and close > aLo)
+        sh := na
+    if not na(sl) and close < sl
+        int span = math.min(bar_index - slBar, 300)
+        float hi = high
+        int k    = 0
+        for i = 0 to span
+            if high[i] > hi
+                hi := high[i]
+                k  := i
+        if hi - close >= minI * atr_
+            float bot = math.min(open[k], close[k])
+            if k > 1
+                for j = k - 1 to math.max(k - 12, 1)
+                    if close[j] < open[j] and open[j] - close[j] >= 0.8 * atr_
+                        break
+                    bot := math.min(bot, math.min(open[j], close[j]))
+            sTop  := hi
+            sBot  := math.max(math.min(bot, hi - 0.25 * atr_), hi - 1.5 * atr_)
+            sTime := time[k]
+            sStr  := (not na(phBeforeSl) and hi > phBeforeSl) or (not na(pdH) and hi > pdH and close < pdH) or (asDone and hi > aHi and close < aHi)
+        sl := na
+    [dTop, dBot, dTime, dStr, sTop, sBot, sTime, sStr]
+
+f_sdPrev(int len, float minI) =>
+    [a, b, c, d, e, f, g, h] = f_sdZones(len, minI)
+    [a[1], b[1], c[1], d[1], e[1], f[1], g[1], h[1]]
+
+// ---------------------------------------------------------------- Schritt 1: Bias (ohne Repainting)
+[effD, trD, pendD, dirD, refD, fuD, fdD, hiD, loD] = request.security(syminfo.tickerid, tfD, f_structPrev(swLenD, protHtf), lookahead = barmerge.lookahead_on)
+[eff4, tr4, pend4, dir4, ref4, fu4, fd4, hi4, lo4] = request.security(syminfo.tickerid, tf4, f_structPrev(swLen4, protHtf), lookahead = barmerge.lookahead_on)
+[effH, trH, pendH, dirH, refH, fuH, fdH, hiH, loH] = request.security(syminfo.tickerid, tfH, f_structPrev(swLenH, protHtf), lookahead = barmerge.lookahead_on)
+adxH = request.security(syminfo.tickerid, tfH, f_adxPrev(adxLen), lookahead = barmerge.lookahead_on)
+atrH = request.security(syminfo.tickerid, tfH, ta.atr(14)[1], lookahead = barmerge.lookahead_on)
+
+// Laufende Wende gilt, wenn ein Nachbar-Zeitrahmen bestätigt in dieselbe Richtung zeigt
+eff4e = eff4 != 0 ? eff4 : (pendOk and pend4 != 0 and (pend4 == effD or pend4 == effH) ? pend4 : 0)
+effDe = effD != 0 ? effD : (pendOk and pendD != 0 and pendD == eff4e ? pendD : 0)
+pendUsed = effDe != effD or eff4e != eff4
+biasRaw = switch biasMode
+    "Daily + 4H"      => effDe != 0 and effDe == eff4e ? effDe : 0
+    "Daily + 4H + 1H" => effDe != 0 and effDe == eff4e and eff4e == effH ? effDe : 0
+    => effDe
+htfOpp = htfBlock and biasRaw != 0 and pendH == 0 and trH == -biasRaw
+bias   = htfOpp ? 0 : biasRaw
+biasOk = bias != 0
+
+// ---------------------------------------------------------------- Schritt 2: Struktur im Chart
+[effC, trC, pendC, dirC, refC, fuC, fdC, legHiC, legLoC, legHiBarC, legLoBarC, brkC, chochC, brkLvlC, brkAtC] = f_struct(swLen, useProtC)
+ph = ta.pivothigh(high, swLen, swLen)
+pl = ta.pivotlow(low, swLen, swLen)
+atrV = ta.atr(14)
+
+var array<float> phVals = array.new<float>()
+var array<int>   phBars = array.new<int>()
+var array<float> plVals = array.new<float>()
+var array<int>   plBars = array.new<int>()
+if not na(ph)
+    array.push(phVals, ph)
+    array.push(phBars, bar_index - swLen)
+    if array.size(phVals) > 30
+        array.shift(phVals)
+        array.shift(phBars)
+if not na(pl)
+    array.push(plVals, pl)
+    array.push(plBars, bar_index - swLen)
+    if array.size(plVals) > 30
+        array.shift(plVals)
+        array.shift(plBars)
+
+validLeg = dirC != 0 and not na(legHiC) and not na(legLoC)
+newExtC  = brkC == 0 and validLeg and ((dirC == 1 and legHiC != nz(legHiC[1])) or (dirC == -1 and legLoC != nz(legLoC[1])))
+var int legId = 0
+if brkC != 0 or newExtC
+    legId += 1
+
+// ---------------------------------------------------------------- Zeit (Schritt 7), Key Levels, VWAP, CVD
+inWinA = not na(time(timeframe.period, winA, winTz))
+inWinB = not na(time(timeframe.period, winB, winTz))
+winOk  = not useWin or not isEntryTf or inWinA or inWinB
+
+tfMin  = timeframe.in_seconds() / 60.0
+nyDow  = dayofweek(time, "America/New_York")
+nyDom  = dayofmonth(time, "America/New_York")
+nyMin  = hour(time, "America/New_York") * 60 + minute(time, "America/New_York")
+f_overlap(int ev) =>
+    nyMin <= ev + newsPad and nyMin + tfMin >= ev - newsPad
+nfpBlock  = nyDow == dayofweek.friday and nyDom <= 7 and f_overlap(510)
+eiaBlock  = preset == "Öl" and nyDow == dayofweek.wednesday and f_overlap(630)
+custBlock = useCust and not na(time(timeframe.period, custSess, custTz))
+newsBlock = isIntra and ((useNews and (nfpBlock or eiaBlock)) or custBlock)
+
+pdh = request.security(syminfo.tickerid, "D", high[1], lookahead = barmerge.lookahead_on)
+pdl = request.security(syminfo.tickerid, "D", low[1],  lookahead = barmerge.lookahead_on)
+var int dayStartBar = na
+if timeframe.change("D")
+    dayStartBar := bar_index
+
+inAsia    = not na(time(timeframe.period, asiaSess, asiaTz))
+asiaStart = inAsia and not inAsia[1]
+var float asiaH        = na
+var float asiaL        = na
+var int   asiaStartBar = na
+if asiaStart
+    asiaH        := high
+    asiaL        := low
+    asiaStartBar := bar_index
+else if inAsia
+    asiaH := math.max(asiaH, high)
+    asiaL := math.min(asiaL, low)
+asiaDone = not inAsia and not na(asiaH)
+
+tfLow    = timeframe.in_seconds() <= 300 ? "1" : timeframe.in_seconds() <= 3600 ? "5" : "60"
+ltfDelta = request.security_lower_tf(syminfo.tickerid, tfLow, close > open ? volume : close < open ? -volume : 0.0)
+estDelta = close > open ? volume : close < open ? -volume : 0.0
+float dSum = na
+if cvdSrc == "Intrabar" and array.size(ltfDelta) > 0
+    dSum := array.sum(ltfDelta)
+barDelta = na(dSum) ? estDelta : dSum
+cvdS     = ta.cum(nz(barDelta))
+hasVol   = not na(volume) and ta.cum(nz(volume)) > 0
+
+vwapRaw = ta.vwap(hlc3)
+vwapV   = isIntra ? vwapRaw : na
+plot(showVwap and useVwap ? vwapV : na, "VWAP", color = color.new(color.fuchsia, 25), linewidth = 1)
+
+// ---------------------------------------------------------------- Schritt 3: Zonen-Objekte (Demand / Supply 1H + 15M)
+type Zone
+    box  bx
+    int  dir
+    int  tf
+    int  state
+    bool star
+
+var array<Zone> zones = array.new<Zone>()
+tfMs   = timeframe.in_seconds() * 1000
+tf15   = timeframe.in_seconds() <= 900 ? "15" : timeframe.period
+sd15Ok = use15Zones and timeframe.in_seconds() <= 900
+sdTfOk = timeframe.in_seconds() <= 3600
+
+[zdTop, zdBot, zdTime, zdStar, zsTop, zsBot, zsTime, zsStar] = request.security(syminfo.tickerid, tfH, f_sdPrev(5, sdImp), lookahead = barmerge.lookahead_on)
+c1h = request.security(syminfo.tickerid, tfH, close[1], lookahead = barmerge.lookahead_on)
+[qdTop, qdBot, qdTime, qdStar, qsTop, qsBot, qsTime, qsStar] = request.security(syminfo.tickerid, tf15, f_sdPrev(5, sdImp), lookahead = barmerge.lookahead_on)
+c15 = request.security(syminfo.tickerid, tf15, close[1], lookahead = barmerge.lookahead_on)
+
+f_zText(int d, bool star, bool tested, int tfz) =>
+    zVis ? (tfz == 15 ? "15M " : f_tfName(tfH) + " ") + (d == 1 ? "Demand" : "Supply") + (star ? " ★" : "") + (tested ? " (getestet)" : "") : ""
+
+f_addZone(int d, float t, float b, int tm, bool star, int tfz) =>
+    color c = d == 1 ? colBull : colBear
+    bx = box.new(tm, t, time + 5 * tfMs, b, xloc = xloc.bar_time, border_color = zVis ? color.new(c, tfz == 15 ? 50 : 60) : colNone, border_style = tfz == 15 ? line.style_dashed : line.style_solid, bgcolor = zVis ? color.new(c, tfz == 15 ? 88 : 82) : colNone, text = f_zText(d, star, false, tfz), text_color = c, text_size = size.tiny, text_halign = text.align_right, text_valign = d == 1 ? text.align_bottom : text.align_top)
+    array.push(zones, Zone.new(bx, d, tfz, 0, star))
+    int cnt = 0
+    for z in zones
+        if z.dir == d
+            cnt += 1
+    if cnt > maxZones
+        for i = 0 to array.size(zones) - 1
+            Zone zz = array.get(zones, i)
+            if zz.dir == d
+                box.delete(zz.bx)
+                array.remove(zones, i)
+                break
+
+if sdTfOk and not na(zdTime) and zdTime != nz(zdTime[1]) and (not onlySweepZones or zdStar)
+    f_addZone(1, zdTop, zdBot, zdTime, zdStar, 60)
+if sdTfOk and not na(zsTime) and zsTime != nz(zsTime[1]) and (not onlySweepZones or zsStar)
+    f_addZone(-1, zsTop, zsBot, zsTime, zsStar, 60)
+if sd15Ok and not na(qdTime) and qdTime != nz(qdTime[1]) and (not onlySweepZones or qdStar)
+    f_addZone(1, qdTop, qdBot, qdTime, qdStar, 15)
+if sd15Ok and not na(qsTime) and qsTime != nz(qsTime[1]) and (not onlySweepZones or qsStar)
+    f_addZone(-1, qsTop, qsBot, qsTime, qsStar, 15)
+
+// Zonen pflegen: Invalidierung per Schluss des Zonen-Zeitrahmens, Test, Verblassen, Kontakt
+var int lastSdBar = na
+var int lastSdDir = 0
+bool hitDemand = false
+bool hitSupply = false
+if array.size(zones) > 0
+    for i = array.size(zones) - 1 to 0
+        Zone z = array.get(zones, i)
+        bTop = box.get_top(z.bx)
+        bBot = box.get_bottom(z.bx)
+        zRef = z.tf == 15 ? c15 : c1h
+        bool invalid = z.dir == 1 ? zRef < bBot : zRef > bTop
+        if invalid
+            box.delete(z.bx)
+            array.remove(zones, i)
+        else
+            box.set_right(z.bx, time + 5 * tfMs)
+            bool touch = low <= bTop and high >= bBot
+            if (not onlyFresh or z.state < 2) and touch
+                lastSdBar := bar_index
+                lastSdDir := z.dir
+            bool firstTouch = z.dir == 1 ? (low <= bTop and low[1] > bTop) : (high >= bBot and high[1] < bBot)
+            bool left = z.dir == 1 ? low > bTop + (bTop - bBot) : high < bBot - (bTop - bBot)
+            if z.state == 0 and firstTouch
+                z.state := 1
+                if z.dir == 1
+                    hitDemand := true
+                else
+                    hitSupply := true
+            else if z.state == 1 and left
+                z.state := 2
+                if zVis
+                    color zc = z.dir == 1 ? colBull : colBear
+                    box.set_bgcolor(z.bx, color.new(zc, 94))
+                    box.set_border_color(z.bx, color.new(zc, 85))
+                    box.set_text(z.bx, f_zText(z.dir, z.star, true, z.tf))
+
+f_hasZone(int d) =>
+    bool res = false
+    for z in zones
+        if z.dir == d and (not onlyFresh or z.state < 2)
+            res := true
+    res
+
+f_inSd(int d, float p) =>
+    bool res = false
+    for z in zones
+        if z.dir == d and (not onlyFresh or z.state < 2) and p <= box.get_top(z.bx) and p >= box.get_bottom(z.bx)
+            res := true
+    res
+
+f_sdOverlap(int d, float zb, float zt) =>
+    bool sd = false
+    bool star = false
+    for z in zones
+        if z.dir == d and (not onlyFresh or z.state < 2) and box.get_top(z.bx) >= zb and zt >= box.get_bottom(z.bx)
+            sd := true
+            if z.star
+                star := true
+    [sd, star]
+
+// Suchzone aus dem Kontext-Zeitrahmen (Fib fibA bis 1 des letzten 1H-Impulses)
+zA = dirH == 1 ? hiH - (hiH - loH) * fibA : dirH == -1 ? loH + (hiH - loH) * fibA : na
+z1 = dirH == 1 ? loH : dirH == -1 ? hiH : na
+htfLegAtr = not na(hiH) and not na(loH) and not na(atrH) and atrH > 0 ? (hiH - loH) / atrH : na
+htfLegOk  = htfMinImp <= 0 or (not na(htfLegAtr) and htfLegAtr >= htfMinImp)
+fibZoneOk = biasOk and dirH == bias and not na(zA) and not na(z1) and htfLegOk
+sdZoneOk  = biasOk and f_hasZone(bias)
+f_gate(bool f, bool s) =>
+    zoneGate == "Fib oder Demand/Supply" ? (f or s) : zoneGate == "Fib und Demand/Supply" ? (f and s) : zoneGate == "nur Fib 0,5–1" ? f : s
+zoneOk = f_gate(fibZoneOk, sdZoneOk)
+
+// ---------------------------------------------------------------- Fair Value Gaps des Chart-Impulses
+var array<float> fTop = array.new<float>()
+var array<float> fBot = array.new<float>()
+var array<box>   fBox = array.new<box>()
+
+f_fvgClear() =>
+    for bx in fBox
+        box.delete(bx)
+    array.clear(fBox)
+    array.clear(fTop)
+    array.clear(fBot)
+
+f_fvgAdd(float t, float b, int x1) =>
+    if array.size(fTop) >= 5
+        box.delete(array.shift(fBox))
+        array.shift(fTop)
+        array.shift(fBot)
+    box bxNew = na
+    if showFvg
+        bxNew := box.new(x1, t, bar_index + 5, b, border_color = colNone, bgcolor = color.new(color.gray, 85), text = "FVG", text_color = color.new(color.gray, 20), text_size = size.tiny, text_halign = text.align_right)
+    array.push(fTop, t)
+    array.push(fBot, b)
+    array.push(fBox, bxNew)
+
+// ---------------------------------------------------------------- Chart-Bruch auswerten: Abgriff, Muster, CVD, FVG, Zeichnung
+var bool   legSweepV = false
+var string legSweepT = ""
+var string legPatT   = ""
+var bool   legCvdV   = false
+
+if brkC == 1
+    lo    = legLoC
+    loBar = legLoBarC
+    prevL   = f_prevPivot(plVals, plBars, loBar)
+    swingSw = not na(prevL) and lo < prevL
+    pdlSw   = isIntra and not na(pdl) and lo < pdl and close > pdl
+    asiaSw  = isIntra and showAsia and asiaDone and not na(asiaL) and lo < asiaL and close > asiaL
+    legSweepV := swingSw or pdlSw or asiaSw
+    legSweepT := pdlSw ? "PDL" : asiaSw ? "Asia Low" : swingSw ? "Swing-Tief" : ""
+    legPatT   := usePat ? f_pattern(bar_index - loBar, 1) : ""
+    prevLB   = f_prevPivotBar(plBars, loBar)
+    legCvdV := useCvd and hasVol and not na(prevL) and not na(prevLB) and bar_index - prevLB <= 1900 and lo < prevL and cvdS[bar_index - loBar] > cvdS[bar_index - prevLB]
+    f_fvgClear()
+    if useFvg
+        int n = math.min(bar_index - loBar - 2, 300)
+        if n >= 0
+            for i = n to 0
+                if low[i] > high[i + 2] and low[i] - high[i + 2] >= fvgMin * atrV
+                    f_fvgAdd(low[i], high[i + 2], bar_index - i - 2)
+    if showStr and not na(brkAtC)
+        line.new(brkAtC, brkLvlC, bar_index, brkLvlC, color = colBull, style = chochC ? line.style_dashed : line.style_solid)
+        label.new(math.round((brkAtC + bar_index) / 2), brkLvlC, chochC ? "CHoCH" : "BOS", style = label.style_label_down, color = colNone, textcolor = colBull, size = size.tiny)
+    if showSweepX and legSweepV
+        label.new(loBar, lo, legSweepT == "Swing-Tief" ? "X" : "X " + legSweepT, style = label.style_label_up, color = colNone, textcolor = colBull, size = size.small)
+
+if brkC == -1
+    hi    = legHiC
+    hiBar = legHiBarC
+    prevH   = f_prevPivot(phVals, phBars, hiBar)
+    swingSw = not na(prevH) and hi > prevH
+    pdhSw   = isIntra and not na(pdh) and hi > pdh and close < pdh
+    asiaSw  = isIntra and showAsia and asiaDone and not na(asiaH) and hi > asiaH and close < asiaH
+    legSweepV := swingSw or pdhSw or asiaSw
+    legSweepT := pdhSw ? "PDH" : asiaSw ? "Asia High" : swingSw ? "Swing-Hoch" : ""
+    legPatT   := usePat ? f_pattern(bar_index - hiBar, -1) : ""
+    prevHB   = f_prevPivotBar(phBars, hiBar)
+    legCvdV := useCvd and hasVol and not na(prevH) and not na(prevHB) and bar_index - prevHB <= 1900 and hi > prevH and cvdS[bar_index - hiBar] < cvdS[bar_index - prevHB]
+    f_fvgClear()
+    if useFvg
+        int n = math.min(bar_index - hiBar - 2, 300)
+        if n >= 0
+            for i = n to 0
+                if high[i] < low[i + 2] and low[i + 2] - high[i] >= fvgMin * atrV
+                    f_fvgAdd(low[i + 2], high[i], bar_index - i - 2)
+    if showStr and not na(brkAtC)
+        line.new(brkAtC, brkLvlC, bar_index, brkLvlC, color = colBear, style = chochC ? line.style_dashed : line.style_solid)
+        label.new(math.round((brkAtC + bar_index) / 2), brkLvlC, chochC ? "CHoCH" : "BOS", style = label.style_label_up, color = colNone, textcolor = colBear, size = size.tiny)
+    if showSweepX and legSweepV
+        label.new(hiBar, hi, legSweepT == "Swing-Hoch" ? "X" : "X " + legSweepT, style = label.style_label_down, color = colNone, textcolor = colBear, size = size.small)
+
+// Neue FVG im laufenden Impuls, geschlossene entfernen
+if useFvg and brkC == 0 and validLeg and not na(atrV)
+    if dirC == 1 and bar_index - 2 >= legLoBarC and low > high[2] and low - high[2] >= fvgMin * atrV
+        f_fvgAdd(low, high[2], bar_index - 2)
+    if dirC == -1 and bar_index - 2 >= legHiBarC and high < low[2] and low[2] - high >= fvgMin * atrV
+        f_fvgAdd(low[2], high, bar_index - 2)
+if array.size(fTop) > 0
+    for i = array.size(fTop) - 1 to 0
+        bool filled = dirC == 1 ? close < array.get(fBot, i) : close > array.get(fTop, i)
+        bx = array.get(fBox, i)
+        if filled
+            box.delete(bx)
+            array.remove(fBox, i)
+            array.remove(fTop, i)
+            array.remove(fBot, i)
+        else if not na(bx)
+            box.set_right(bx, bar_index + 5)
+
+// ---------------------------------------------------------------- Schritt 8: Fibonacci des Chart-Impulses und Trade-Plan
+f_lvl(float r) =>
+    dirC == 1 ? legHiC - (legHiC - legLoC) * r : legLoC + (legHiC - legLoC) * r
+l0  = f_lvl(0.0)
+lA  = f_lvl(fibA)
+lB  = f_lvl(fibB)
+l1  = f_lvl(1.0)
+lTP = f_lvl(fibTP)
+slP   = dirC == 1 ? l1 - slBuf * atrV : l1 + slBuf * atrV
+riskV = math.abs(lB - slP)
+tpP   = tpMode == "CRV fix" ? (dirC == 1 ? lB + crvT * riskV : lB - crvT * riskV) : lTP
+rr    = riskV > 0 ? math.abs(tpP - lB) / riskV : na
+legAtr = validLeg and atrV > 0 ? (legHiC - legLoC) / atrV : na
+impOk  = minImp <= 0 or (not na(legAtr) and legAtr >= minImp)
+crvOk  = not reqCrv or (not na(rr) and rr >= crvT - 0.05)
+sideOk = not useSide or (not na(adxH) and adxH >= adxMin)
+
+var bool touchedB = false
+if brkC != 0 or newExtC
+    touchedB := false
+freshBar = brkC == 0 and not newExtC
+hitB = freshBar and validLeg and not touchedB and ((dirC == 1 and low <= lB) or (dirC == -1 and high >= lB))
+if hitB
+    touchedB := true
+
+// ---------------------------------------------------------------- Schritt 5: Kontakt mit der Suchzone
+// Kontakt wird je Richtung der 1H-Struktur gespeichert (unabhängig vom Bias); der Bias wird beim Bruch geprüft
+zoneDirOk = dirH != 0 and not na(zA) and not na(z1) and htfLegOk
+inFib     = zoneDirOk and (dirH == 1 ? (low <= zA and close >= z1) : (high >= zA and close <= z1))
+inSdNow   = not na(lastSdBar) and lastSdBar == bar_index
+var int lastFibBar = na
+var int lastFibDir = 0
+if inFib
+    lastFibBar := bar_index
+    lastFibDir := dirH
+fibRecent = biasOk and not na(lastFibBar) and bar_index - lastFibBar <= htfLook and lastFibDir == bias
+sdRecent  = biasOk and not na(lastSdBar) and bar_index - lastSdBar <= htfLook and lastSdDir == bias
+contactNow    = biasOk and f_gate(inFib and dirH == bias, inSdNow and lastSdDir == bias)
+contactRecent = f_gate(fibRecent, sdRecent)
+contactAge    = fibRecent and sdRecent ? math.min(bar_index - lastFibBar, bar_index - lastSdBar) : fibRecent ? bar_index - lastFibBar : sdRecent ? bar_index - lastSdBar : na
+
+f_originOk(int d, float p) =>
+    fIn = dirH == d and not na(zA) and not na(z1) and (d == 1 ? (p <= zA and p >= z1) : (p >= zA and p <= z1))
+    sIn = f_inSd(d, p)
+    f_gate(fIn, sIn)
+
+// ---------------------------------------------------------------- Schritt 4: Confluence an der Suchzone (Entry-Chart) bzw. am Chart-Impuls
+f_conf(int d, float zb, float zt) =>
+    int n = 0
+    string c = "Fib"
+    bool star = false
+    if d != 0 and not na(zb) and not na(zt)
+        [sd, st] = f_sdOverlap(d, zb, zt)
+        if sd
+            star := st
+            c += d == 1 ? (star ? " + Demand ★" : " + Demand") : (star ? " + Supply ★" : " + Supply")
+            n += 1
+        if isIntra and not na(pdh) and not na(pdl) and ((pdl >= zb and pdl <= zt) or (pdh >= zb and pdh <= zt))
+            c += " + PDH/L"
+            n += 1
+        if isIntra and showAsia and not na(asiaH) and ((asiaL >= zb and asiaL <= zt) or (asiaH >= zb and asiaH <= zt))
+            c += " + Asia"
+            n += 1
+        if useVwap and not na(vwapV) and vwapV >= zb and vwapV <= zt
+            c += " + VWAP"
+            n += 1
+        bool fv = false
+        int fc = array.size(fTop)
+        if useFvg and fc > 0
+            for i = 0 to fc - 1
+                if array.get(fTop, i) >= zb and zt >= array.get(fBot, i)
+                    fv := true
+        if fv
+            c += " + FVG"
+            n += 1
+    [n, n > 0 ? c : "nur Fib", star]
+
+useHtfBand = isLtf and fibZoneOk
+confDir = useHtfBand ? bias : dirC
+confB   = useHtfBand ? math.min(zA, z1) : (validLeg ? math.min(lA, l1) : na)
+confT   = useHtfBand ? math.max(zA, z1) : (validLeg ? math.max(lA, l1) : na)
+[confN, confTxt, confStar] = f_conf(confDir, confB, confT)
+confOk = confN >= minConf
+
+// ---------------------------------------------------------------- Qualität und Filter
+legPatV   = legPatT != ""
+pts       = (legSweepV ? 1 : 0) + (confStar ? 1 : 0) + (confN >= 2 ? 1 : 0) + (confN >= 3 ? 1 : 0) + (legPatV ? 1 : 0) + (legCvdV ? 1 : 0)
+gradeV    = pts >= 4 ? 3 : pts >= 2 ? 2 : 1
+gradeTxt  = gradeV == 3 ? "A" : gradeV == 2 ? "B" : "C"
+minGradeV = minGrade == "A" ? 3 : minGrade == "B" ? 2 : 1
+gradeOk   = gradeV >= minGradeV
+sweepOk   = not reqSweep or legSweepV
+patOk     = not reqPatE or legPatV
+cvdOk     = not reqCvdE or legCvdV
+
+// Limits in R (Tag / Woche)
+var float dayR  = 0.0
+var float weekR = 0.0
+if timeframe.change("D")
+    dayR := 0.0
+if timeframe.change("W")
+    weekR := 0.0
+dayOk  = dayLimR <= 0 or dayR > -dayLimR + 0.001
+weekOk = weekLimR <= 0 or weekR > -weekLimR + 0.001
+
+filtersOk = impOk and sideOk and sweepOk and patOk and cvdOk and gradeOk and confOk and crvOk and winOk and not newsBlock and dayOk and weekOk
+
+// ---------------------------------------------------------------- Setup-Lebenszyklus
+type Setup
+    int    dir      = 0
+    int    phase    = 0
+    int    legId    = -1
+    int    chochBar = na
+    int    readyBar = na
+    int    tradeLeg = -1
+    int    brkSeq   = -1
+    bool   isChoch  = true
+    bool   originOk = false
+    string reason   = ""
+    float  vE       = na
+    float  vS       = na
+    float  vT       = na
+    int    vGrade   = 2
+    int    vSess    = 2
+
+var Setup S = Setup.new()
+int  phPrev   = S.phase
+bool readyNow = false
+bool chochNow = brkC != 0 and chochC
+var int  brkSeq       = 0
+var int  lastBrkBar   = na
+var bool lastBrkChoch = false
+if brkC != 0
+    brkSeq       += 1
+    lastBrkBar   := bar_index
+    lastBrkChoch := chochC
+originP     = (brkC != 0 ? brkC : dirC) == 1 ? legLoC : legHiC
+originOkNow = not isLtf or not useHtfZone or not useOrigin or f_originOk(bias, originP)
+zoneReq     = not isLtf or not useHtfZone or (contactRecent and originOkNow)
+brkValid    = brkC != 0 and biasOk and brkC == bias and zoneReq
+chochValid  = brkValid and chochC
+// Bias erst nach dem Bruch erschienen: Bruch der letzten N Kerzen in Bias-Richtung zählt nach
+lateValid   = brkC == 0 and biasOk and dirC == bias and not na(lastBrkBar) and bar_index - lastBrkBar <= htfLook and zoneReq
+
+// 1) Rücksetzen: Bias weg oder Struktur gegen das Setup
+if not biasOk
+    if S.phase != 5
+        S.phase := 0
+    S.reason := htfOpp ? "1H bestätigt Gegentrend" : "kein Bias " + f_tfName(tfD) + "/" + f_tfName(tf4)
+else if S.phase >= 3 and S.phase <= 4 and (dirC != S.dir or S.dir != bias)
+    S.phase  := 0
+    S.reason := dirC != S.dir ? "Struktur gegen das Setup gekippt" : "Bias gewechselt"
+
+// 2) Warten / Kontakt
+if biasOk and (S.phase <= 2 or S.phase == 6)
+    if not zoneOk
+        S.phase  := 0
+        S.reason := "keine Suchzone in Bias-Richtung"
+    else
+        S.phase  := contactRecent ? 2 : 1
+        S.reason := contactRecent ? "" : "warte auf Kontakt mit der Suchzone"
+
+// 3) Bestätigung durch CHoCH (oder BOS-Folgeimpuls in Zonennähe, wie v3.x), ggf. nachträglich
+if biasOk and S.phase != 5 and S.phase != 0 and S.brkSeq != brkSeq and (brkValid or lateValid)
+    S.phase    := 3
+    S.dir      := bias
+    S.legId    := legId
+    S.brkSeq   := brkSeq
+    S.chochBar := lastBrkBar
+    S.isChoch  := lastBrkChoch
+    S.originOk := originOkNow
+    S.reason   := ""
+
+// 4) Bereit / verfallen / Entry
+bool vtOpenNow = false
+if S.phase == 3 or S.phase == 4
+    if newExtC and S.phase == 4
+        S.phase := 3
+    bool extConf = S.dir == 1 ? (not na(ph) and ph >= legHiC) : (not na(pl) and pl <= legLoC)
+    if S.phase == 3 and filtersOk and extConf and not touchedB
+        S.phase    := 4
+        S.readyBar := bar_index
+        readyNow   := true
+    if S.phase == 4 and maxWait > 0 and not touchedB and not na(S.readyBar) and bar_index - S.readyBar > maxWait
+        S.phase  := 6
+        S.reason := "Setup verfallen, kein Entry"
+    if (S.phase == 3 or S.phase == 4) and hitB and filtersOk and legId != S.tradeLeg and riskV > 0
+        S.phase    := 5
+        S.tradeLeg := legId
+        S.vE       := lB
+        S.vS       := slP
+        S.vT       := tpP
+        S.vGrade   := 3 - gradeV
+        S.vSess    := inWinA ? 0 : inWinB ? 1 : 2
+        S.reason   := ""
+        vtOpenNow  := true
+    if (S.phase == 3 or S.phase == 4) and not filtersOk
+        S.reason := "Filter offen"
+
+// 5) Aktiver virtueller Trade
+var int   nWin  = 0
+var int   nLoss = 0
+var float sumR  = 0.0
+var int   firstT = time
+var array<int> gW = array.from(0, 0, 0)
+var array<int> gL = array.from(0, 0, 0)
+var array<int> sW = array.from(0, 0, 0)
+var array<int> sL = array.from(0, 0, 0)
+bool vtWinNow  = false
+bool vtLossNow = false
+if S.phase == 5
+    bool lossHit = S.dir == 1 ? low <= S.vS : high >= S.vS
+    bool winHit  = S.dir == 1 ? high >= S.vT : low <= S.vT
+    if lossHit
+        vtLossNow := true
+    else if winHit and not vtOpenNow
+        vtWinNow := true
+    if vtLossNow or vtWinNow
+        float rres = vtWinNow ? math.abs(S.vT - S.vE) / math.abs(S.vE - S.vS) : -1.0
+        sumR  += rres
+        dayR  += rres
+        weekR += rres
+        if vtWinNow
+            nWin += 1
+            array.set(gW, S.vGrade, array.get(gW, S.vGrade) + 1)
+            array.set(sW, S.vSess, array.get(sW, S.vSess) + 1)
+        else
+            nLoss += 1
+            array.set(gL, S.vGrade, array.get(gL, S.vGrade) + 1)
+            array.set(sL, S.vSess, array.get(sL, S.vSess) + 1)
+        S.phase  := 6
+        S.reason := vtWinNow ? "Take-Profit erreicht" : "Stop-Loss erreicht"
+
+phaseChanged = S.phase != phPrev
+
+// Journal
+var array<int>   jTime = array.new<int>()
+var array<int>   jDir  = array.new<int>()
+var array<int>   jGrd  = array.new<int>()
+var array<int>   jSes  = array.new<int>()
+var array<float> jEnt  = array.new<float>()
+var array<float> jSL   = array.new<float>()
+var array<float> jTP   = array.new<float>()
+var array<int>   jRes  = array.new<int>()
+var array<float> jRR   = array.new<float>()
+if vtOpenNow
+    array.push(jTime, time)
+    array.push(jDir, S.dir)
+    array.push(jGrd, S.vGrade)
+    array.push(jSes, S.vSess)
+    array.push(jEnt, S.vE)
+    array.push(jSL, S.vS)
+    array.push(jTP, S.vT)
+    array.push(jRes, 0)
+    array.push(jRR, 0.0)
+    if array.size(jTime) > 100
+        array.shift(jTime)
+        array.shift(jDir)
+        array.shift(jGrd)
+        array.shift(jSes)
+        array.shift(jEnt)
+        array.shift(jSL)
+        array.shift(jTP)
+        array.shift(jRes)
+        array.shift(jRR)
+if (vtWinNow or vtLossNow) and array.size(jRes) > 0
+    int li = array.size(jRes) - 1
+    array.set(jRes, li, vtWinNow ? 1 : -1)
+    array.set(jRR, li, vtWinNow ? math.abs(S.vT - S.vE) / math.abs(S.vE - S.vS) : -1.0)
+
+plotchar(showMarks and vtOpenNow, "Virtueller Entry", "•", location.belowbar, colEnt, size = size.tiny)
+plotchar(showMarks and vtWinNow,  "Virtueller TP",    "✓", location.abovebar, colBull, size = size.tiny)
+plotchar(showMarks and vtLossNow, "Virtueller SL",    "✗", location.belowbar, colBear, size = size.tiny)
+plot(S.phase, "Setup-Phase", display = display.data_window)
+plot(dirC, "Struktur-Trend Chart", display = display.data_window)
+
+// ---------------------------------------------------------------- Zeichnen (nur letzte Kerze)
+var array<line>  drawL = array.new<line>()
+var array<label> drawT = array.new<label>()
+var box gz = na
+
+f_hline(array<line> ls, array<label> ts, int x1, int x2, float y, color col, string txt, int w, string sty) =>
+    array.push(ls, line.new(x1, y, x2, y, color = col, width = w, style = sty))
+    array.push(ts, label.new(x2, y, txt + "  " + f_px(y), style = label.style_label_left, color = colNone, textcolor = col, size = size.small))
+
+if barstate.islast
+    for ln in drawL
+        line.delete(ln)
+    array.clear(drawL)
+    for lb in drawT
+        label.delete(lb)
+    array.clear(drawT)
+    box.delete(gz)
+    x2 = bar_index + 15
+    if showFib and validLeg
+        x1 = math.min(legLoBarC, legHiBarC)
+        gz := box.new(x1, math.max(lA, lB), x2, math.min(lA, lB), border_color = colNone, bgcolor = color.new(colEnt, 90))
+        f_hline(drawL, drawT, x1, x2, l0, colFib, "0", 1, line.style_solid)
+        f_hline(drawL, drawT, x1, x2, lA, colFib, str.tostring(fibA), 1, line.style_dotted)
+        f_hline(drawL, drawT, x1, x2, lB, colEnt, showPlan ? "Entry " + str.tostring(fibB) : str.tostring(fibB), 2, line.style_solid)
+        if slBuf > 0
+            f_hline(drawL, drawT, x1, x2, l1, colFib, "1", 1, line.style_solid)
+        f_hline(drawL, drawT, x1, x2, slP, showPlan ? colBear : colFib, showPlan ? "SL" : "1", 1, line.style_solid)
+        f_hline(drawL, drawT, x1, x2, tpP, showPlan ? colBull : colFib, showPlan ? "TP" : str.tostring(fibTP), 1, line.style_dashed)
+    if isIntra and showPD and not na(pdh) and not na(dayStartBar)
+        f_hline(drawL, drawT, dayStartBar, x2, pdh, color.new(color.orange, 0), "PDH", 1, line.style_dashed)
+        f_hline(drawL, drawT, dayStartBar, x2, pdl, color.new(color.orange, 0), "PDL", 1, line.style_dashed)
+    if isIntra and showAsia and not na(asiaH) and not na(asiaStartBar)
+        f_hline(drawL, drawT, asiaStartBar, x2, asiaH, color.new(color.purple, 0), "Asia High", 1, line.style_dotted)
+        f_hline(drawL, drawT, asiaStartBar, x2, asiaL, color.new(color.purple, 0), "Asia Low", 1, line.style_dotted)
+
+// ---------------------------------------------------------------- Alarme (festes Feldformat)
+// Einmal in TradingView einen Alarm mit Bedingung "RP4" -> "Jeder alert()-Funktionsaufruf" anlegen.
+f_phaseTxt(int p) =>
+    p == 1 ? "WARTEN" : p == 2 ? "KONTAKT" : p == 3 ? "BESTÄTIGT" : p == 4 ? "BEREIT" : p == 5 ? "AKTIV" : p == 6 ? "BEENDET" : "KEIN SETUP"
+f_sessTxt() =>
+    inWinA ? winAName : inWinB ? winBName : "außerhalb"
+f_arrP(int b, int pd) =>
+    pd == 1 ? "↑?" : pd == -1 ? "↓?" : b == 1 ? "↑" : b == -1 ? "↓" : "–"
+f_msg(string txt) =>
+    "RP4 | " + syminfo.ticker + " | " + timeframe.period + " | " + txt + " | Kurs " + f_px(close)
+f_confirmTxt() =>
+    (legPatT != "" ? legPatT : "kein Muster") + " · " + (not useCvd ? "CVD aus" : not hasVol ? "CVD ohne Volumen" : legCvdV ? "CVD-Divergenz" : "keine CVD-Divergenz")
+f_plan() =>
+    (S.dir == 1 ? "LONG" : "SHORT") + " | Typ " + (S.isChoch ? "CHoCH" : "BOS") + " | Entry " + f_px(lB) + " | SL " + f_px(slP) + " | TP " + f_px(tpP) + " | CRV 1:" + str.tostring(rr, "#.0") + " | Q " + gradeTxt + " (" + str.tostring(pts) + "/6) | Conf " + confTxt + " | " + f_confirmTxt() + " | Session " + f_sessTxt()
+
+biasChanged = barstate.isconfirmed and bias != bias[1]
+if alBias and biasChanged
+    alert(f_msg("Bias " + (bias == 1 ? "LONG" : bias == -1 ? "SHORT" : "KEIN TRADE") + " (" + f_tfName(tfD) + " " + f_arrP(effD, pendD) + " · " + f_tfName(tf4) + " " + f_arrP(eff4, pend4) + " · " + f_tfName(tfH) + " " + f_arrP(effH, pendH) + ")"), alert.freq_once_per_bar_close)
+if alZone and biasOk and ((hitDemand and bias == 1) or (hitSupply and bias == -1))
+    alert(f_msg("Phase KONTAKT | " + (bias == 1 ? "Demand" : "Supply") + "-Zone erreicht | " + (bias == 1 ? "LONG" : "SHORT") + " | Conf " + confTxt), alert.freq_once_per_bar_close)
+if alZone and biasOk and inFib and not inFib[1]
+    alert(f_msg("Phase KONTAKT | Fib-Zone " + f_tfName(tfH) + " erreicht | " + (bias == 1 ? "LONG" : "SHORT") + " | Conf " + confTxt), alert.freq_once_per_bar_close)
+if alChoch and chochValid
+    alert(f_msg("Phase BESTÄTIGT | CHoCH " + (bias == 1 ? "bullisch" : "bärisch") + (legSweepV ? " nach Abgriff " + legSweepT : "") + (S.originOk ? " aus der Suchzone" : "") + " | Q " + gradeTxt), alert.freq_once_per_bar_close)
+if alReady and readyNow
+    alert(f_msg("Phase BEREIT | Limit " + (S.dir == 1 ? "Buy" : "Sell") + " setzen | " + f_plan()), alert.freq_once_per_bar_close)
+if alPhase and phaseChanged and not readyNow and not chochValid
+    alert(f_msg("Phase " + f_phaseTxt(S.phase) + (S.reason != "" ? " | " + S.reason : "")), alert.freq_once_per_bar_close)
+if alTrade and vtOpenNow
+    alert(f_msg("Virtueller Entry | " + f_plan()), alert.freq_once_per_bar_close)
+if alTrade and vtWinNow
+    alert(f_msg("Virtueller Trade | Take-Profit erreicht"), alert.freq_once_per_bar_close)
+if alTrade and vtLossNow
+    alert(f_msg("Virtueller Trade | Stop-Loss erreicht"), alert.freq_once_per_bar_close)
+
+// ---------------------------------------------------------------- Dashboard = Checkliste Blueprint 701
+tPos = switch tblPos
+    "Unten rechts" => position.bottom_right
+    "Oben links"   => position.top_left
+    "Unten links"  => position.bottom_left
+    => position.top_right
+txtSize = switch tblSize
+    "Sehr klein" => size.tiny
+    "Normal"     => size.normal
+    => size.small
+colHead = color.new(#2962ff, 20)
+
+f_row(table t, int row, string name, string txt, int state) =>
+    cellCol = state == 1 ? color.new(colBull, 25) : state == -1 ? color.new(colBear, 25) : color.new(color.gray, 45)
+    table.cell(t, 0, row, name, text_color = color.white, bgcolor = color.new(color.black, 30), text_size = txtSize, text_halign = text.align_left)
+    table.cell(t, 1, row, txt,  text_color = color.white, bgcolor = cellCol, text_size = txtSize, text_halign = text.align_left)
+f_chk(table t, int row, string name, bool ok, string txt) =>
+    f_row(t, row, name, (ok ? "✅ " : "❌ ") + txt, ok ? 1 : -1)
+f_head(table t, int row, string left, string right) =>
+    table.cell(t, 0, row, left,  text_color = color.white, bgcolor = colHead, text_size = txtSize, text_halign = text.align_left)
+    table.cell(t, 1, row, right, text_color = color.white, bgcolor = colHead, text_size = txtSize, text_halign = text.align_left)
+f_pct(int w, int l) =>
+    n = w + l
+    n == 0 ? "–" : str.tostring(100.0 * w / n, "#") + " % (" + str.tostring(n) + ")"
+f_flip(int b, int pd, float rf, float fu, float fd) =>
+    string t = ""
+    if pd == 1
+        t := "↑? hält über " + f_px(rf)
+    else if pd == -1
+        t := "↓? hält unter " + f_px(rf)
+    if not na(fu)
+        t += (t == "" ? "" : " / ") + "↑ ab " + f_px(fu)
+    if not na(fd)
+        t += (t == "" ? "" : " / ") + "↓ ab " + f_px(fd)
+    t == "" ? "–" : t
+
+var table tbl = table.new(tPos, 2, 40, border_width = 1, frame_color = color.gray, frame_width = 1)
+
+if showTbl and barstate.islast
+    table.clear(tbl, 0, 0, 1, 39)
+    int r = 0
+    biasTxt = bias == 1 ? "LONG" : bias == -1 ? "SHORT" : "KEIN TRADE"
+    f_head(tbl, r, "BLUEPRINT 701 · " + preset, (isLtf ? "Entry-Chart" : isEntryTf ? "15M" : "Zonen-Chart") + " · Phase " + f_phaseTxt(S.phase))
+    r += 1
+
+    // 1 Bias
+    f_chk(tbl, r, "1 Bias " + f_tfName(tfD) + " · " + f_tfName(tf4) + " · " + f_tfName(tfH), biasOk, f_arrP(effD, pendD) + " " + f_arrP(eff4, pend4) + " " + f_arrP(effH, pendH) + "  →  " + biasTxt + (htfOpp ? " (1H Gegentrend bestätigt)" : pendUsed and biasOk ? " (laufende Wende, vom tieferen TF bestätigt)" : ""))
+    r += 1
+    if showFlip
+        f_row(tbl, r, "   Kipp " + f_tfName(tfD), f_flip(effD, pendD, refD, fuD, fdD), 0)
+        r += 1
+        f_row(tbl, r, "   Kipp " + f_tfName(tf4), f_flip(eff4, pend4, ref4, fu4, fd4), 0)
+        r += 1
+        f_row(tbl, r, "   Kipp " + f_tfName(tfH), f_flip(effH, pendH, refH, fuH, fdH), 0)
+        r += 1
+
+    // 2 Struktur Chart
+    bool strOk = biasOk and dirC == bias
+    f_chk(tbl, r, "2 Struktur Chart", strOk, f_dirTxt(dirC) + (strOk ? " – passt" : not biasOk ? " – kein Bias" : " – gegen Bias, CHoCH fehlt"))
+    r += 1
+
+    // 3 Zone
+    string zTxt = ""
+    if fibZoneOk
+        zTxt += "Fib " + str.tostring(fibA) + "–1 " + f_tfName(tfH) + " " + f_px(z1) + "–" + f_px(zA) + (na(htfLegAtr) ? "" : " (" + str.tostring(htfLegAtr, "#.0") + " ATR)")
+    if sdZoneOk
+        zTxt += (zTxt == "" ? "" : " · ") + (bias == 1 ? "Demand" : "Supply") + " frisch"
+    if dirH == bias and not htfLegOk and not na(htfLegAtr)
+        zTxt += (zTxt == "" ? "" : " · ") + f_tfName(tfH) + "-Impuls zu klein (" + str.tostring(htfLegAtr, "#.0") + " ATR, min. " + str.tostring(htfMinImp, "#.0") + ")"
+    if zTxt == ""
+        zTxt := not biasOk ? "kein Bias" : dirH != bias ? f_tfName(tfH) + "-Struktur " + f_dirTxt(dirH) + ", keine Fib-Zone" : "keine Zone in Bias-Richtung"
+    f_chk(tbl, r, "3 Zone im Trendkontext", zoneOk, zTxt)
+    r += 1
+
+    // 4 Confluence
+    f_chk(tbl, r, "4 Zwei Faktoren" + (useHtfBand ? " (an " + f_tfName(tfH) + "-Zone)" : ""), confOk, confTxt + " · " + str.tostring(confN + 1) + " Faktor" + (confN + 1 == 1 ? "" : "en") + " (min. " + str.tostring(minConf + 1) + ")")
+    r += 1
+
+    // 5 Preis in Zone
+    string pTxt = ""
+    if isLtf
+        pTxt := contactNow ? "in der Suchzone" : contactRecent ? "Kontakt vor " + str.tostring(contactAge) + " Kerzen (gilt " + str.tostring(htfLook) + ")" : fibZoneOk ? "nicht erreicht, Fib-Zone " + (bias == 1 ? "unter" : "über") + " dem Kurs" : "nicht erreicht"
+    else
+        pTxt := not validLeg ? "–" : dirC == 1 ? (close > lA ? "über Fib-Zone, warten" : close >= lB ? "in Zone " + str.tostring(fibA) + "–" + str.tostring(fibB) : close >= l1 ? "tiefer Rücksetzer" : "unter Fib 1, ungültig") : (close < lA ? "unter Fib-Zone, warten" : close <= lB ? "in Zone " + str.tostring(fibA) + "–" + str.tostring(fibB) : close <= l1 ? "tiefer Rücksetzer" : "über Fib 1, ungültig")
+    bool pOk = isLtf ? contactRecent : (validLeg and ((dirC == 1 and close <= lA and close >= l1) or (dirC == -1 and close >= lA and close <= l1)))
+    f_chk(tbl, r, "5 Preis in / nahe Zone", pOk, pTxt)
+    r += 1
+
+    // 6 CHoCH
+    bool cOk = S.phase >= 3 and S.phase <= 5
+    string cTxt = cOk ? (S.isChoch ? "CHoCH" : "BOS") + " vor " + str.tostring(bar_index - S.chochBar) + " Kerzen" + (validLeg and not na(legAtr) ? " · Impuls " + str.tostring(legAtr, "#.0") + " ATR" : "") + (S.originOk ? " · aus der Zone" : "") + (legSweepV ? " · X " + legSweepT : "") : (not na(lastBrkBar) and bar_index - lastBrkBar <= htfLook and dirC == bias ? (lastBrkChoch ? "CHoCH" : "BOS") + " vor " + str.tostring(bar_index - lastBrkBar) + " Kerzen, aber " + (not contactRecent ? "kein Zonenkontakt" : "Ursprung nicht in der Zone") : "noch kein CHoCH in Bias-Richtung")
+    f_chk(tbl, r, isLtf ? "6 CHoCH 1–5M" : "6 Strukturwechsel", cOk, cTxt)
+    r += 1
+
+    // 7 Zeit
+    string timeTxt = newsBlock ? "News-Sperre AKTIV" : not useWin ? "Fenster aus" : not isEntryTf ? "Fenster gilt bis 15M" : inWinA ? winAName + " aktiv" : inWinB ? winBName + " aktiv" : "außerhalb der Fenster"
+    f_chk(tbl, r, "7 Handelsfenster · News", winOk and not newsBlock, timeTxt)
+    r += 1
+
+    // 8 Plan
+    f_chk(tbl, r, "8 Entry · SL · TP · CRV", validLeg and crvOk, validLeg ? "E " + f_px(lB) + " · SL " + f_px(slP) + " · TP " + f_px(tpP) + " · CRV 1:" + (na(rr) ? "–" : str.tostring(rr, "#.0")) : "kein Impuls")
+    r += 1
+
+    // Setup-Status
+    f_head(tbl, r, "SETUP", f_phaseTxt(S.phase) + (S.dir != 0 and S.phase >= 3 ? (S.dir == 1 ? " LONG" : " SHORT") : ""))
+    r += 1
+    string openF = ""
+    if validLeg and not impOk
+        openF += ", Impuls"
+    if not sideOk
+        openF += ", Seitwärts (ADX)"
+    if validLeg and not sweepOk
+        openF += ", Abgriff"
+    if validLeg and not patOk
+        openF += ", Muster"
+    if validLeg and not cvdOk
+        openF += ", CVD"
+    if not confOk
+        openF += ", Confluence"
+    if validLeg and not gradeOk
+        openF += ", Qualität"
+    if not winOk
+        openF += ", Fenster"
+    if newsBlock
+        openF += ", News"
+    if validLeg and not crvOk
+        openF += ", CRV"
+    if not dayOk
+        openF += ", Tageslimit"
+    if not weekOk
+        openF += ", Wochenlimit"
+    string stTxt = S.phase == 0 ? S.reason : S.phase == 1 ? "warte auf Kontakt mit der Suchzone" : S.phase == 2 ? "Kontakt, warte auf CHoCH" : S.phase == 3 ? (openF == "" ? "Impuls läuft, warte auf Hoch/Tief" : "offen: " + str.substring(openF, 2)) : S.phase == 4 ? "Limit-Order setzen, warte auf Entry" : S.phase == 5 ? "Entry ausgelöst, läuft" : S.reason
+    f_row(tbl, r, "Status", stTxt, S.phase == 4 or S.phase == 5 ? (S.dir) : S.phase == 0 ? -1 : 0)
+    r += 1
+    f_row(tbl, r, "Qualität", gradeTxt + " (" + str.tostring(pts) + "/6)" + (legSweepV ? " · X " + legSweepT : " · kein Abgriff") + " · " + f_confirmTxt(), gradeOk ? 1 : -1)
+    r += 1
+    if showDet
+        f_row(tbl, r, "   Impuls", validLeg and not na(legAtr) ? str.tostring(legAtr, "#.0") + " ATR (min. " + str.tostring(minImp, "#.0") + ")" : "–", validLeg ? (impOk ? 1 : -1) : 0)
+        r += 1
+        f_row(tbl, r, "   ADX " + f_tfName(tfH), na(adxH) ? "–" : str.tostring(adxH, "#.0") + " (min. " + str.tostring(adxMin) + ")", useSide ? (sideOk ? 1 : -1) : 0)
+        r += 1
+    f_row(tbl, r, "Limits", "Tag " + (dayR >= 0 ? "+" : "") + str.tostring(dayR, "#.0") + " R (−" + str.tostring(dayLimR, "#.0") + ") · Woche " + (weekR >= 0 ? "+" : "") + str.tostring(weekR, "#.0") + " R (−" + str.tostring(weekLimR, "#.0") + ")", dayOk and weekOk ? 1 : -1)
+    r += 1
+
+    // Statistik
+    if showStat
+        nT   = nWin + nLoss
+        hitR = nT > 0 ? 100.0 * nWin / nT : na
+        beR  = na(rr) ? na : 100.0 / (1.0 + rr)
+        f_head(tbl, r, "STATISTIK (virtuell)", "seit " + str.format_time(firstT, "dd.MM.yy", syminfo.timezone))
+        r += 1
+        f_row(tbl, r, "Trades · Ergebnis", str.tostring(nT) + " (" + str.tostring(nWin) + " TP / " + str.tostring(nLoss) + " SL) · " + (sumR >= 0 ? "+" : "") + str.tostring(sumR, "#.0") + " R", nT == 0 ? 0 : sumR >= 0 ? 1 : -1)
+        r += 1
+        f_row(tbl, r, "Trefferquote", (na(hitR) ? "–" : str.tostring(hitR, "#.0") + " %") + (na(beR) ? "" : " (Break-even " + str.tostring(beR, "#") + " %)"), na(hitR) or na(beR) ? 0 : hitR >= beR ? 1 : -1)
+        r += 1
+        if showStatX
+            f_row(tbl, r, "Qualität A · B · C", f_pct(array.get(gW, 0), array.get(gL, 0)) + " · " + f_pct(array.get(gW, 1), array.get(gL, 1)) + " · " + f_pct(array.get(gW, 2), array.get(gL, 2)), 0)
+            r += 1
+            nOut = array.get(sW, 2) + array.get(sL, 2)
+            f_row(tbl, r, "Session", winAName + " " + f_pct(array.get(sW, 0), array.get(sL, 0)) + " · " + winBName + " " + f_pct(array.get(sW, 1), array.get(sL, 1)) + (nOut > 0 ? " · sonst " + f_pct(array.get(sW, 2), array.get(sL, 2)) : ""), 0)
+            r += 1
+
+// ---------------------------------------------------------------- Journal
+jPos = switch jPosIn
+    "Unten rechts" => position.bottom_right
+    "Oben links"   => position.top_left
+    "Oben rechts"  => position.top_right
+    => position.bottom_left
+f_jc(table t, int c, int r, string txt, color bg) =>
+    table.cell(t, c, r, txt, text_color = color.white, bgcolor = bg, text_size = txtSize)
+var table jtbl = table.new(jPos, 9, 22, border_width = 1, frame_color = color.gray, frame_width = 1)
+if showStat and showJour and barstate.islast
+    table.clear(jtbl, 0, 0, 8, 21)
+    f_jc(jtbl, 0, 0, "JOURNAL", colHead)
+    f_jc(jtbl, 1, 0, "Richtung", colHead)
+    f_jc(jtbl, 2, 0, "Qual.", colHead)
+    f_jc(jtbl, 3, 0, "Session", colHead)
+    f_jc(jtbl, 4, 0, "Entry", colHead)
+    f_jc(jtbl, 5, 0, "SL", colHead)
+    f_jc(jtbl, 6, 0, "TP", colHead)
+    f_jc(jtbl, 7, 0, "Ergebnis", colHead)
+    f_jc(jtbl, 8, 0, "R", colHead)
+    int jn = array.size(jTime)
+    if jn == 0
+        f_jc(jtbl, 0, 1, "Noch keine virtuellen Trades im geladenen Verlauf", color.new(color.gray, 45))
+        table.merge_cells(jtbl, 0, 1, 8, 1)
+    else
+        int rows = math.min(jn, jRows)
+        for k = 0 to rows - 1
+            int i  = jn - 1 - k
+            int rs = array.get(jRes, i)
+            int dr = array.get(jDir, i)
+            int gd = array.get(jGrd, i)
+            int ss = array.get(jSes, i)
+            float rv = array.get(jRR, i)
+            color bg  = rs == 1 ? color.new(colBull, 55) : rs == -1 ? color.new(colBear, 55) : color.new(colEnt, 55)
+            color nbg = color.new(color.black, 30)
+            f_jc(jtbl, 0, k + 1, str.format_time(array.get(jTime, i), "dd.MM. HH:mm", winTz), nbg)
+            f_jc(jtbl, 1, k + 1, dr == 1 ? "Long" : "Short", nbg)
+            f_jc(jtbl, 2, k + 1, gd == 0 ? "A" : gd == 1 ? "B" : "C", nbg)
+            f_jc(jtbl, 3, k + 1, ss == 0 ? winAName : ss == 1 ? winBName : "sonst", nbg)
+            f_jc(jtbl, 4, k + 1, f_px(array.get(jEnt, i)), nbg)
+            f_jc(jtbl, 5, k + 1, f_px(array.get(jSL, i)), nbg)
+            f_jc(jtbl, 6, k + 1, f_px(array.get(jTP, i)), nbg)
+            f_jc(jtbl, 7, k + 1, rs == 1 ? "TP" : rs == -1 ? "SL" : "läuft", bg)
+            f_jc(jtbl, 8, k + 1, rs == 0 ? "–" : (rv >= 0 ? "+" : "") + str.tostring(rv, "#.0"), bg)
